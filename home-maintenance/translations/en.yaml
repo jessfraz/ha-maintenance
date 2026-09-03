@@ -1,0 +1,4 @@
+configuration:
+  config_file:
+    name: Catalog filename
+    description: JSON catalog filename in the app addon_config directory

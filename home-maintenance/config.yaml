@@ -1,0 +1,26 @@
+# https://developers.home-assistant.io/docs/apps/configuration
+name: Home Maintenance
+version: "0.1.0"
+slug: home_maintenance
+description: Fast physical home maintenance backed by one private catalog
+url: "https://github.com/jessfraz/home-maintenance"
+stage: experimental
+init: false
+arch:
+  - aarch64
+  - amd64
+ingress: true
+panel_icon: mdi:wrench-clock
+panel_title: Maintenance
+panel_admin: false
+homeassistant_api: true
+backup: cold
+timeout: 30
+map:
+  - type: addon_config
+    read_only: true
+options:
+  config_file: items.json
+schema:
+  config_file: str
+image: "ghcr.io/jessfraz/home-maintenance"

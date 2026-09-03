@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+bad_paths=$(find . -path ./.git -prune -o -type f \
+  \( -name 'items.json' -o -name 'secrets.yaml' -o -name '*.db' \
+  -o -name '*.pem' -o -name '*.key' \) -print)
+if [[ -n "$bad_paths" ]]; then
+  echo "private or generated files found:" >&2
+  echo "$bad_paths" >&2
+  exit 1
+fi
+
+if ! jq -e '
+  .title == "Example maintenance" and
+  .timezone == "Etc/UTC" and
+  (.todo_entity | startswith("todo.example_")) and
+  .due_soon_days == 11 and
+  (.items | length) == 2 and
+  .items[0].schedule.days == 47 and
+  .items[1].schedule.months == 5 and
+  all(.items[];
+    (.id | startswith("example-")) and
+    (.name | startswith("Example ")) and
+    .location == "Example room" and
+    .group == "Examples" and
+    (.reorder_url | startswith("https://example.com/"))
+  )
+' config/items.example.json >/dev/null; then
+  echo "items.example.json must contain only explicitly fictional data" >&2
+  exit 1
+fi
+
+if rg -n --hidden --glob '!.git/**' \
+  '(https?://(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)|Bearer [A-Za-z0-9._-]{20,}|sk-[A-Za-z0-9_-]{20,})' .; then
+  echo "possible private endpoint or credential found" >&2
+  exit 1
+fi
+
+private_catalog=${HOME_MAINTENANCE_PRIVATE_CATALOG:-}
+if [[ -n "$private_catalog" ]]; then
+  if [[ ! -f "$private_catalog" ]]; then
+    echo "private catalog comparison file does not exist" >&2
+    exit 1
+  fi
+  while IFS= read -r value; do
+    if rg -Fq -- "$value" .; then
+      echo "public tree repeats a private catalog string" >&2
+      rg -Fl -- "$value" . >&2
+      exit 1
+    fi
+  done < <(
+    jq -r '
+      .. | strings |
+      select(length >= 8)
+    ' "$private_catalog" | sort -u
+  )
+fi
+
+echo "public-tree check passed"

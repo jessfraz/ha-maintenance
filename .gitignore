@@ -1,0 +1,7 @@
+.DS_Store
+*.db
+*.db-shm
+*.db-wal
+csrf.key
+home-maintenance/items.json
+!home-maintenance/go.mod

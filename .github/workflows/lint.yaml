@@ -1,0 +1,26 @@
+name: Lint Home Assistant App
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Run Home Assistant App Lint
+        uses: frenck/action-addon-linter@v2.21
+        with:
+          path: ./home-maintenance

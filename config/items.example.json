@@ -1,0 +1,42 @@
+{
+  "$schema": "./items.schema.json",
+  "title": "Example maintenance",
+  "timezone": "Etc/UTC",
+  "todo_entity": "todo.example_maintenance",
+  "due_soon_days": 11,
+  "items": [
+    {
+      "id": "example-air-filter",
+      "name": "Example air filter",
+      "location": "Example room",
+      "group": "Examples",
+      "ha_summary": "Replace example air filter",
+      "ha_description": "Replace the example filter.",
+      "schedule": { "days": 47 },
+      "initial_due": "2031-02-17",
+      "reorder_url": "https://example.com/example-air-filter",
+      "instructions": [
+        "Switch off the example equipment.",
+        "Install the demonstration replacement.",
+        "Restart the example equipment and mark the task done."
+      ],
+      "specs": [
+        { "label": "Size", "value": "DEMO-SIZE" },
+        { "label": "Rating", "value": "Demo rating" }
+      ]
+    },
+    {
+      "id": "example-water-filter",
+      "name": "Example water filter",
+      "location": "Example room",
+      "group": "Examples",
+      "ha_summary": "Replace example water filter",
+      "schedule": { "months": 5 },
+      "initial_due": "2031-08-17",
+      "reorder_url": "https://example.com/example-water-filter",
+      "specs": [
+        { "label": "Part", "value": "EXAMPLE-1000" }
+      ]
+    }
+  ]
+}

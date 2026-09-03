@@ -1,0 +1,11 @@
+#!/usr/bin/with-contenv bashio
+
+declare config_file
+config_file=$(bashio::config 'config_file')
+
+bashio::log.info "Starting Home Maintenance with /config/${config_file}"
+exec /usr/bin/home-maintenance \
+    -config "/config/${config_file}" \
+    -database /data/history.db \
+    -csrf-secret /data/csrf.key \
+    -listen :8099
