@@ -11,8 +11,9 @@ from pathlib import Path
 import pytest
 from aiohttp import ClientError, ClientTimeout
 from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntryState
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
@@ -23,6 +24,13 @@ from custom_components.home_maintenance.const import (
     DOMAIN,
     SUMMARY_KEYS,
 )
+from custom_components.home_maintenance.models import (
+    ActorKind,
+    ChecklistStep,
+    MaintenanceItem,
+)
+
+from .conftest import SECOND_STEP_ID, STEP_ID
 
 PREFIX = "/api/home_maintenance/v1"
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
@@ -163,6 +171,7 @@ async def test_ha_to_rust_maintenance_contract(
     definition = {
         "id": "replace-filter",
         "name": "Replace filter",
+        "summary": "Replace filter",
         "timezone": "UTC",
         "due": "2025-01-01",
         "schedule": {"days": 1, "months": 0, "years": 0},
@@ -302,3 +311,158 @@ async def test_generated_pairing_reaches_loaded_and_reports_presence(
         system = await response.json()
     assert system["credential_role"] == "integration"
     assert system["integration_connected"] is True
+
+
+async def test_native_checklist_preserves_parent_and_archives_step_progress(
+    hass: HomeAssistant,
+    hass_client,
+    hass_user,
+    hass_user_token,
+    rust_backend: RustBackend,
+) -> None:
+    """Real HA actions update current steps; explicit parent completion resets them."""
+    configured = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"], {"next_step_id": "standalone"}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"],
+        {
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    assert configured["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done(wait_background_tasks=True)
+    entry = configured["result"]
+    admin = await hass_client()
+    user = await hass_client(hass_user_token)
+    created = await admin.post(
+        f"{PREFIX}/items",
+        json={
+            "id": "service-filter",
+            "name": "Appliance filter",
+            "summary": "Service the appliance filter",
+            "description": "Use the specified replacement and keep the area dry.",
+            "timezone": "UTC",
+            "due": "2025-01-01",
+            "schedule": {"days": 1, "months": 0, "years": 0},
+            "instructions": ["Follow the appliance instructions."],
+            "checklist": [
+                {"id": STEP_ID, "summary": "Turn off the appliance"},
+                {"id": SECOND_STEP_ID, "summary": "Install the replacement"},
+            ],
+        },
+        headers={"Idempotency-Key": "create-checklist-item"},
+    )
+    assert created.status == 201
+    original_etag = created.headers["ETag"]
+    original = MaintenanceItem.parse(await created.json())
+    await entry.runtime_data.async_refresh()
+    todo = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    assert len(todo["todo.maintenance"]["items"]) == 1
+    assert todo["todo.maintenance"]["items"][0]["summary"] == original.summary
+    assert (
+        "Checklist (0/2 complete)"
+        in todo["todo.maintenance"]["items"][0]["description"]
+    )
+
+    first_step = {
+        "item_id": original.id,
+        "occurrence_id": str(original.occurrence_id),
+        "step_id": STEP_ID,
+        "completed": True,
+        "if_match": original_etag,
+        "idempotency_key": "complete-first-checklist-step",
+    }
+    for _ in range(2):
+        result = await hass.services.async_call(
+            DOMAIN,
+            "set_checklist_step",
+            first_step,
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+            return_response=True,
+        )
+        assert result["revision"] == original.revision + 1
+        assert result["occurrence_id"] == str(original.occurrence_id)
+    changed = await user.get(f"{PREFIX}/items/{original.id}")
+    progress = MaintenanceItem.parse(await changed.json())
+    assert progress.occurrence_id == original.occurrence_id
+    assert progress.due == original.due
+    assert progress.checklist[0].completion is not None
+    assert progress.checklist[0].completion.actor.kind is ActorKind.USER
+    assert progress.checklist[0].completion.actor.id == f"ha:{hass_user.id}"
+
+    await hass.services.async_call(
+        DOMAIN,
+        "set_checklist_step",
+        {
+            "item_id": original.id,
+            "occurrence_id": str(original.occurrence_id),
+            "step_id": SECOND_STEP_ID,
+            "completed": True,
+        },
+        blocking=True,
+    )
+    await entry.runtime_data.async_refresh()
+    current = next(
+        item for item in entry.runtime_data.data.items if item.id == original.id
+    )
+    assert current.occurrence_id == original.occurrence_id
+    assert current.due == original.due
+    assert current.checklist[1].completion is not None
+    assert current.checklist[1].completion.actor.kind is ActorKind.SYSTEM
+    assert current.checklist[1].completion.actor.id == "ha:automation"
+    assert hass.states.get("todo.maintenance").state == "1"
+    assert entry.runtime_data.data.summary["completed"] == 0
+
+    await hass.services.async_call(
+        "todo",
+        "update_item",
+        {
+            "entity_id": "todo.maintenance",
+            "item": str(original.occurrence_id),
+            "status": "completed",
+        },
+        context=Context(user_id=hass_user.id),
+        blocking=True,
+    )
+    response = await user.get(f"{PREFIX}/items/{original.id}")
+    successor = MaintenanceItem.parse(await response.json())
+    assert successor.occurrence_id != original.occurrence_id
+    assert successor.due != original.due
+    assert tuple(step.id for step in successor.checklist) == tuple(
+        step.id for step in original.checklist
+    )
+    assert all(step.completion is None for step in successor.checklist)
+    events_response = await user.get(f"{PREFIX}/items/{original.id}/events")
+    events = await events_response.json()
+    assert len(events["items"]) == 1
+    snapshot = tuple(
+        ChecklistStep.parse(step) for step in events["items"][0]["checklist"]
+    )
+    assert snapshot == current.checklist
+
+    with pytest.raises(HomeAssistantError, match="task changed"):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_checklist_step",
+            {
+                "item_id": original.id,
+                "occurrence_id": str(original.occurrence_id),
+                "step_id": STEP_ID,
+                "completed": True,
+            },
+            blocking=True,
+        )
+    after_stale = await user.get(f"{PREFIX}/items/{original.id}")
+    assert MaintenanceItem.parse(await after_stale.json()) == successor

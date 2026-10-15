@@ -300,6 +300,23 @@ main {
   font-size: 12px;
   line-height: 1.6;
 }
+.item-name {
+  margin-bottom: 5px;
+  font-size: 13px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.detail-item-name {
+  color: var(--muted);
+  font-size: 14px;
+  margin: -12px 0 24px;
+}
+.task-description {
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.8;
+  margin: 0 0 24px;
+}
 .item-due {
   text-align: right;
 }
@@ -457,6 +474,120 @@ dialog .dialog-heading h2 {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.occurrence-checklist {
+  border-top: 1px solid var(--line);
+  margin: 24px 0;
+  padding-top: 20px;
+}
+.occurrence-checklist legend {
+  font-size: 15px;
+  font-weight: 600;
+  padding: 0 10px 0 0;
+}
+.checklist-progress {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 14px;
+}
+.checklist-progress progress {
+  width: 100px;
+  height: 6px;
+  accent-color: var(--green);
+}
+.checklist-progress p {
+  margin: 0;
+}
+.checklist-steps,
+.checklist-history {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.checklist-steps li + li {
+  border-top: 1px solid var(--line);
+}
+.checklist-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  padding: 13px 0;
+  cursor: pointer;
+}
+.checklist-step input {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin: 1px 0 0;
+  flex-shrink: 0;
+  accent-color: var(--green);
+}
+.checklist-step-text {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.checklist-step-text small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+  margin-top: 4px;
+}
+.checklist-pending {
+  background: var(--soft);
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 14px;
+}
+.checklist-pending p {
+  margin: 0 0 10px;
+}
+.checklist-editor-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.checklist-editor-row label {
+  flex: 1;
+  min-width: 0;
+  margin: 8px 0;
+}
+.checklist-editor-row button {
+  padding: 0;
+  width: 34px;
+  height: 42px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.history-checklist {
+  margin: 12px 0;
+}
+.history-checklist summary {
+  font-size: 12px;
+  cursor: pointer;
+}
+#events .checklist-history li {
+  border: 0;
+  padding: 8px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.checklist-history .step-result {
+  display: inline-block;
+  min-width: 63px;
+  margin-right: 8px;
+  font-weight: 600;
+}
+.checklist-history .step-attribution {
+  display: block;
+  color: var(--muted);
+  padding-left: 71px;
+  font-size: 11px;
+}
 .specs {
   margin: 0;
 }
@@ -504,6 +635,11 @@ dialog .dialog-heading h2 {
 }
 .actions .archive-action {
   margin-left: auto;
+}
+.completion-help {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: 12px;
 }
 .history {
   border-top: 1px solid var(--line);

@@ -24,3 +24,38 @@ complete:
       description: Reuse this key only when retrying the same completion.
       selector:
         text:
+set_checklist_step:
+  name: Set a checklist step
+  description: Mark or clear a step on the current occurrence. This does not complete the parent task or advance its due date.
+  fields:
+    item_id:
+      name: Item ID
+      required: true
+      selector:
+        text:
+    occurrence_id:
+      name: Occurrence ID
+      description: The current occurrence UUID. Stale occurrences cannot update successor steps.
+      required: true
+      selector:
+        text:
+    step_id:
+      name: Checklist step ID
+      required: true
+      selector:
+        text:
+    completed:
+      name: Completed
+      required: true
+      selector:
+        boolean:
+    if_match:
+      name: Item version
+      description: Optional current ETag. Otherwise the current version is fetched once.
+      selector:
+        text:
+    idempotency_key:
+      name: Idempotency key
+      description: Reuse only when retrying the same step update.
+      selector:
+        text:

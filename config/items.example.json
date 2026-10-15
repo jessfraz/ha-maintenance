@@ -3,6 +3,8 @@
     {
       "id": "example-air-filter",
       "name": "Example air filter",
+      "summary": "Replace the example air filter",
+      "description": "Example task showing a recurring replacement with an optional checklist.",
       "timezone": "Etc/UTC",
       "due": "2031-02-17",
       "schedule": {
@@ -17,6 +19,16 @@
         "Switch off the example equipment.",
         "Install the demonstration replacement.",
         "Restart the example equipment and mark the task done."
+      ],
+      "checklist": [
+        {
+          "id": "10000000-0000-4000-8000-000000000001",
+          "summary": "Switch off the example equipment"
+        },
+        {
+          "id": "10000000-0000-4000-8000-000000000002",
+          "summary": "Replace the example filter and restart the equipment"
+        }
       ],
       "specs": [
         {
@@ -38,6 +50,7 @@
     {
       "id": "example-water-filter",
       "name": "Example water filter",
+      "summary": "Replace the example water filter",
       "timezone": "Etc/UTC",
       "due": "2031-08-17",
       "schedule": {
@@ -47,6 +60,12 @@
       },
       "location": "Example room",
       "group": "Examples",
+      "checklist": [
+        {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "summary": "Install the example replacement cartridge"
+        }
+      ],
       "specs": [
         {
           "label": "Part",

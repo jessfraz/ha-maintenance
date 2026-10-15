@@ -23,6 +23,8 @@ let parentPrefix = null;
 let metadataRowId = 0;
 const completionRequests = new Map();
 const completionBusy = new Set();
+const checklistRequests = new Map();
+const checklistBusy = new Set();
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -129,6 +131,22 @@ function timestampLabel(value) {
   }).format(new Date(value));
 }
 
+function actorLabel(actor) {
+  return actor.kind === "system" ? `${actor.name} (system)` : actor.name;
+}
+
+function checklistProgress(steps) {
+  return `${steps.filter((step) => step.completion).length} of ${steps.length} steps done`;
+}
+
+function itemBusy(item) {
+  return completionBusy.has(item.id) || checklistBusy.has(item.id);
+}
+
+function itemPending(item) {
+  return completionRequests.has(item.id) || checklistRequests.has(item.id);
+}
+
 function dueInfo(item) {
   const due = item.occurrence.due;
   const days = Math.round(
@@ -231,7 +249,7 @@ function renderList() {
   const view = byId("view").value;
   const visible = items
     .filter((item) => {
-      const matches = [item.name, item.location, item.group]
+      const matches = [item.name, item.summary, item.location, item.group]
         .filter(Boolean)
         .some((value) => value.toLocaleLowerCase().includes(query));
       const days = dueInfo(item).days;
@@ -265,7 +283,7 @@ function renderList() {
             ? "No archived items"
             : "A fresh start";
     const copy = query
-      ? "Try a different name, location, or group."
+      ? "Try a different task, item name, location, or group."
       : view === "active"
         ? isOwner
           ? "Add your first maintenance item to build a queue that keeps itself in order."
@@ -289,7 +307,7 @@ function renderList() {
         "eyebrow",
       ),
     );
-    const link = element("a", item.name);
+    const link = element("a", item.summary);
     link.href = new URL(itemPath(item.id), base).href;
     link.addEventListener("click", (event) => {
       if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
@@ -299,7 +317,19 @@ function renderList() {
     });
     content.append(
       link,
-      element("div", `Every ${cadence(item.schedule)}`, "item-meta"),
+      element("div", item.name, "item-name"),
+      element(
+        "div",
+        [
+          `Every ${cadence(item.schedule)}`,
+          item.occurrence.checklist.length
+            ? checklistProgress(item.occurrence.checklist)
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        "item-meta",
+      ),
     );
     const due = element("div", undefined, "item-due");
     const info = dueInfo(item);
@@ -393,14 +423,116 @@ function action(label, handler, className = "quiet") {
   return button;
 }
 
+function renderChecklist(item) {
+  const steps = item.occurrence.checklist;
+  const pending = checklistRequests.get(item.id);
+  if (!steps.length && !pending) return null;
+  const fieldset = element("fieldset", undefined, "occurrence-checklist");
+  fieldset.append(element("legend", "Checklist"));
+  fieldset.setAttribute("aria-busy", String(checklistBusy.has(item.id)));
+  const heading = element("div", undefined, "checklist-progress");
+  const progress = element("progress");
+  progress.max = Math.max(steps.length, 1);
+  progress.value = steps.filter((step) => step.completion).length;
+  progress.setAttribute("aria-label", "Checklist progress");
+  heading.append(progress, element("p", checklistProgress(steps), "muted"));
+  fieldset.append(heading);
+  const list = element("ol", undefined, "checklist-steps");
+  for (const step of steps) {
+    const row = element("li");
+    const label = element("label", undefined, "checklist-step");
+    const input = element("input");
+    input.type = "checkbox";
+    input.id = `checklist-${step.id}`;
+    input.checked = Boolean(step.completion);
+    input.disabled = item.archived || itemBusy(item) || itemPending(item);
+    const text = element("span", undefined, "checklist-step-text");
+    const summary = element("span", step.summary);
+    summary.id = `checklist-label-${step.id}`;
+    input.setAttribute("aria-labelledby", summary.id);
+    text.append(summary);
+    if (step.completion) {
+      const attribution = element(
+        "small",
+        `Done by ${actorLabel(step.completion.actor)} · ${timestampLabel(step.completion.completed_at)}`,
+      );
+      attribution.id = `checklist-attribution-${step.id}`;
+      input.setAttribute("aria-describedby", attribution.id);
+      text.append(attribution);
+    }
+    label.append(input, text);
+    input.addEventListener(
+      "change",
+      guarded(
+        () => updateChecklist(item, step.id, input.checked),
+        "detail-error",
+      ),
+    );
+    row.append(label);
+    list.append(row);
+  }
+  fieldset.append(list);
+  if (pending && !checklistBusy.has(item.id)) {
+    const box = element("div", undefined, "checklist-pending");
+    const changed =
+      pending.occurrenceId !== item.occurrence.id ||
+      pending.revision !== item.revision;
+    box.append(
+      element(
+        "p",
+        changed
+          ? "This item changed. Review the current checklist before making another update."
+          : "The last step update has not been confirmed. Retry it before changing another step.",
+        "muted",
+      ),
+    );
+    const retry = action(
+      changed ? "Review updated checklist" : "Retry step update",
+      () => updateChecklist(item, pending.stepId, pending.completed),
+    );
+    retry.id = "retry-checklist";
+    box.append(retry);
+    fieldset.append(box);
+  }
+  return fieldset;
+}
+
+function checklistHistory(steps) {
+  if (!steps.length) return null;
+  const details = element("details", undefined, "history-checklist");
+  details.append(element("summary", `Checklist · ${checklistProgress(steps)}`));
+  const list = element("ul", undefined, "checklist-history");
+  for (const step of steps) {
+    const row = element("li");
+    row.append(
+      element("span", step.completion ? "Done" : "Not done", "step-result"),
+      element("span", step.summary),
+    );
+    if (step.completion)
+      row.append(
+        element(
+          "span",
+          `${actorLabel(step.completion.actor)} · ${timestampLabel(step.completion.completed_at)}`,
+          "step-attribution",
+        ),
+      );
+    list.append(row);
+  }
+  details.append(list);
+  return details;
+}
+
 function renderDetail() {
   const item = selected;
   if (!item) return;
-  byId("detail-title").textContent = item.name;
+  byId("detail-title").textContent = item.summary;
   byId("detail-location").textContent =
     [item.location, item.group].filter(Boolean).join(" / ") || "MAINTENANCE";
   const root = byId("detail-content");
   root.replaceChildren();
+  root.append(element("p", item.name, "detail-item-name"));
+  if (item.description)
+    root.append(element("p", item.description, "task-description"));
   const timing = element("div", undefined, "timing");
   const due = element("div");
   due.append(
@@ -416,6 +548,8 @@ function renderDetail() {
   );
   timing.append(due, interval);
   root.append(timing);
+  const checklist = renderChecklist(item);
+  if (checklist) root.append(checklist);
   if (item.instructions.length) {
     const instructions = section("Instructions");
     const list = element("ol", undefined, "instructions");
@@ -452,26 +586,44 @@ function renderDetail() {
   const actions = byId("actions");
   actions.replaceChildren();
   if (!item.archived) {
+    const pending = completionRequests.get(item.id);
+    const changed =
+      pending &&
+      (pending.occurrenceId !== item.occurrence.id ||
+        pending.revision !== item.revision);
     const complete = action(
-      completionRequests.has(item.id)
-        ? "Retry completion"
-        : "Mark maintenance done",
+      changed
+        ? "Review current occurrence"
+        : pending
+          ? "Retry completion"
+          : "Mark maintenance done",
       () => completeItem(item),
       "",
     );
-    complete.disabled = completionBusy.has(item.id);
+    complete.disabled = itemBusy(item) || checklistRequests.has(item.id);
     actions.append(complete);
+    if (item.occurrence.checklist.some((step) => !step.completion)) {
+      actions.append(
+        element(
+          "p",
+          "Complete the maintenance item when ready. Any unfinished steps remain visible in its history.",
+          "muted completion-help",
+        ),
+      );
+    }
   }
   actions.append(action("Copy NFC link", () => copyItemLink(item)));
   if (isOwner) {
-    actions.append(action("Edit", () => openEditor(item)));
-    actions.append(
-      action(
-        item.archived ? "Restore item" : "Archive",
-        () => archiveItem(item),
-        "quiet archive-action",
-      ),
+    const edit = action("Edit", () => openEditor(item));
+    edit.disabled = itemBusy(item) || itemPending(item);
+    actions.append(edit);
+    const archive = action(
+      item.archived ? "Restore item" : "Archive",
+      () => archiveItem(item),
+      "quiet archive-action",
     );
+    archive.disabled = itemBusy(item) || itemPending(item);
+    actions.append(archive);
   }
 }
 
@@ -536,11 +688,7 @@ async function loadEvents(generation = detailGeneration) {
     if (generation !== detailGeneration || selected?.id !== id) return;
     for (const event of page.items) {
       const row = element("li");
-      const actor =
-        event.actor.kind === "system"
-          ? `${event.actor.name} (system)`
-          : event.actor.name;
-      row.append(element("strong", `Completed by ${actor}`));
+      row.append(element("strong", `Completed by ${actorLabel(event.actor)}`));
       const time = element("time", timestampLabel(event.completed_at));
       time.dateTime = event.completed_at;
       row.append(
@@ -550,6 +698,8 @@ async function loadEvents(generation = detailGeneration) {
           `Previously due ${dateLabel(event.previous_due)} · next due ${dateLabel(event.next_due)}`,
         ),
       );
+      const checklist = checklistHistory(event.checklist);
+      if (checklist) row.append(checklist);
       byId("events").append(row);
     }
     eventsPage = page.next_page;
@@ -574,7 +724,7 @@ async function loadEvents(generation = detailGeneration) {
 }
 
 async function completeItem(item) {
-  if (completionBusy.has(item.id)) return;
+  if (itemBusy(item) || checklistRequests.has(item.id)) return;
   let request = completionRequests.get(item.id);
   if (
     request &&
@@ -633,7 +783,7 @@ async function completeItem(item) {
     await loadEvents();
   }
   notice(
-    `Maintenance recorded. ${updated.name} is next due ${dateLabel(updated.occurrence.due)}.`,
+    `Maintenance recorded. ${updated.summary} is next due ${dateLabel(updated.occurrence.due)}.`,
   );
   if (selected?.id === item.id)
     byId("detail-status").textContent =
@@ -644,6 +794,103 @@ async function completeItem(item) {
       true,
     ),
   );
+}
+
+async function updateChecklist(item, stepId, completed) {
+  if (itemBusy(item) || item.archived || completionRequests.has(item.id))
+    return;
+  let request = checklistRequests.get(item.id);
+  if (
+    request &&
+    (request.occurrenceId !== item.occurrence.id ||
+      request.revision !== item.revision ||
+      request.stepId !== stepId ||
+      request.completed !== completed)
+  ) {
+    checklistRequests.delete(item.id);
+    byId("detail-error").textContent =
+      "Review the current checklist before making another change.";
+    renderDetail();
+    return;
+  }
+  if (!request) {
+    request = {
+      key: crypto.randomUUID(),
+      stepId,
+      completed,
+      occurrenceId: item.occurrence.id,
+      revision: item.revision,
+    };
+    checklistRequests.set(item.id, request);
+  }
+  const generation = detailGeneration;
+  checklistBusy.add(item.id);
+  byId("detail-error").textContent = "";
+  byId("detail-status").textContent = "Saving checklist progress…";
+  renderDetail();
+  let updated;
+  try {
+    updated = await api(
+      `v1/items/${encodeURIComponent(item.id)}/checklist/${encodeURIComponent(request.stepId)}`,
+      {
+        method: "PUT",
+        headers: {
+          "If-Match": `"${request.revision}"`,
+          "Idempotency-Key": request.key,
+        },
+        body: JSON.stringify({
+          occurrence_id: request.occurrenceId,
+          completed: request.completed,
+        }),
+      },
+    );
+    checklistRequests.delete(item.id);
+    if (selected?.id === item.id) {
+      if (
+        selected.revision === request.revision &&
+        selected.occurrence.id === request.occurrenceId
+      )
+        selected = updated;
+      byId("detail-status").textContent =
+        `Checklist progress saved. ${checklistProgress(selected.occurrence.checklist)}.`;
+    }
+  } catch (error) {
+    if (error instanceof ApiError && [404, 409, 412].includes(error.status)) {
+      checklistRequests.delete(item.id);
+      if (selected?.id === item.id) {
+        await openDetail(item.id, false);
+        byId("detail-error").textContent =
+          "This item or checklist changed. Review the current occurrence before updating a step again.";
+      }
+    } else if (selected?.id === item.id) {
+      byId("detail-error").textContent =
+        `${errorMessage(error)} Retry step update to confirm the original change safely.`;
+    }
+    if (selected?.id === item.id) byId("detail-status").textContent = "";
+  } finally {
+    checklistBusy.delete(item.id);
+    if (selected?.id === item.id && byId("detail").open) {
+      const scroll = byId("detail").scrollTop;
+      renderDetail();
+      byId("detail").scrollTop = scroll;
+      if (
+        generation === detailGeneration &&
+        document.activeElement === document.body
+      ) {
+        const focus = checklistRequests.has(item.id)
+          ? byId("retry-checklist")
+          : byId(`checklist-${stepId}`);
+        focus?.focus({ preventScroll: true });
+      }
+    }
+  }
+  if (updated)
+    await load().catch((error) =>
+      notice(
+        `Checklist progress was saved, but the queue could not be refreshed. ${errorMessage(error)}`,
+        true,
+      ),
+    );
 }
 
 async function archiveItem(item) {
@@ -720,6 +967,71 @@ function addMetadataRow(kind, label = "", value = "") {
   return row;
 }
 
+function updateChecklistEditor() {
+  const rows = [...byId("checklist-rows").children];
+  rows.forEach((row, index) => {
+    row.querySelector("label span").textContent = `Step ${index + 1}`;
+    for (const direction of ["up", "down"]) {
+      const button = row.querySelector(`[data-move="${direction}"]`);
+      button.disabled =
+        direction === "up" ? index === 0 : index === rows.length - 1;
+      button.setAttribute("aria-label", `Move step ${index + 1} ${direction}`);
+    }
+    row
+      .querySelector("[data-remove]")
+      .setAttribute("aria-label", `Remove step ${index + 1}`);
+  });
+  byId("add-checklist-step").disabled = rows.length >= 100;
+  byId("checklist-editor-status").textContent = rows.length
+    ? `${rows.length} of 100 steps`
+    : "No checklist steps yet.";
+}
+
+function addChecklistRow(step = { id: crypto.randomUUID(), summary: "" }) {
+  if (byId("checklist-rows").children.length >= 100) return null;
+  const row = element("div", undefined, "checklist-editor-row");
+  row.dataset.stepId = step.id;
+  const label = element("label");
+  const input = element("input");
+  input.id = `edit-checklist-${step.id}`;
+  input.name = "checklist_summary";
+  input.value = step.summary;
+  input.required = true;
+  input.maxLength = 200;
+  label.htmlFor = input.id;
+  label.append(element("span"), input);
+  row.append(label);
+  for (const [direction, text] of [
+    ["up", "↑"],
+    ["down", "↓"],
+  ]) {
+    const button = element("button", text, "quiet");
+    button.type = "button";
+    button.dataset.move = direction;
+    button.addEventListener("click", () => {
+      if (direction === "up" && row.previousElementSibling)
+        row.previousElementSibling.before(row);
+      if (direction === "down" && row.nextElementSibling)
+        row.nextElementSibling.after(row);
+      updateChecklistEditor();
+      input.focus();
+    });
+    row.append(button);
+  }
+  const remove = element("button", "×", "quiet");
+  remove.type = "button";
+  remove.dataset.remove = "true";
+  remove.addEventListener("click", () => {
+    row.remove();
+    updateChecklistEditor();
+    byId("add-checklist-step").focus();
+  });
+  row.append(remove);
+  byId("checklist-rows").append(row);
+  updateChecklistEditor();
+  return row;
+}
+
 function openEditor(item = null) {
   if (!isOwner) return;
   editing = item;
@@ -736,8 +1048,11 @@ function openEditor(item = null) {
   byId("reload-edit").hidden = true;
   byId("spec-rows").replaceChildren();
   byId("resource-rows").replaceChildren();
+  byId("checklist-rows").replaceChildren();
   for (const name of [
     "name",
+    "summary",
+    "description",
     "id",
     "location",
     "group",
@@ -761,6 +1076,8 @@ function openEditor(item = null) {
     addMetadataRow("spec", spec.label, spec.value);
   for (const resource of item?.resources || [])
     addMetadataRow("resource", resource.label, resource.url);
+  for (const step of item?.checklist || []) addChecklistRow(step);
+  updateChecklistEditor();
   if (!byId("editor").open) byId("editor").showModal();
   byId("name").focus();
 }
@@ -803,6 +1120,12 @@ async function saveItem() {
   }
   const body = {
     name: value("name"),
+    summary: value("summary"),
+    description: value("description") || null,
+    checklist: [...byId("checklist-rows").children].map((row) => ({
+      id: row.dataset.stepId,
+      summary: row.querySelector("input").value.trim(),
+    })),
     location: value("location") || null,
     group: value("group") || null,
     timezone: value("timezone"),
@@ -1013,6 +1336,9 @@ byId("add-spec").addEventListener("click", () =>
 );
 byId("add-resource").addEventListener("click", () =>
   addMetadataRow("resource").querySelector("input").focus(),
+);
+byId("add-checklist-step").addEventListener("click", () =>
+  addChecklistRow()?.querySelector("input").focus(),
 );
 byId("check-installation").addEventListener("click", () =>
   loadInstallation(true),

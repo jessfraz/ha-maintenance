@@ -13,12 +13,15 @@ from .const import DOMAIN, MAX_REQUEST_BYTES
 from .coordinator import MaintenanceCoordinator
 from .models import ITEM_ID
 
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_CHECKLIST_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/checklist/{_UUID}")
 _ROUTES = (
     (re.compile(r"items"), frozenset({"GET", "POST"})),
     (re.compile(r"summary|system"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/events"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/completions"), frozenset({"POST"})),
+    (_CHECKLIST_ROUTE, frozenset({"PUT"})),
     (
         re.compile(rf"items/{ITEM_ID.pattern}/archive"),
         frozenset({"PUT", "DELETE"}),
@@ -61,7 +64,9 @@ class MaintenanceView(HomeAssistantView):
         if len(request.query_string) > 4096 or request.query.keys() - allowed_query:
             raise web.HTTPBadRequest(reason="Unsupported query parameters")
         user = request["hass_user"]
-        admin_only = request.method != "GET" and not path.endswith("/completions")
+        admin_only = request.method != "GET" and not (
+            path.endswith("/completions") or _CHECKLIST_ROUTE.fullmatch(path)
+        )
         if admin_only and not user.is_admin:
             raise web.HTTPForbidden
         coordinator = loaded_coordinator(self._hass)

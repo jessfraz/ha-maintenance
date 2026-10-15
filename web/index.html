@@ -56,7 +56,7 @@
             <input
               id="query"
               type="search"
-              placeholder="Search name, location, or group"
+              placeholder="Search task, item, location, or group"
               autocomplete="off"
             ></label
           >
@@ -127,13 +127,32 @@
         </div>
         <fieldset id="item-fields">
           <label for="name"
-            >Name<input
+            >Item name<input
               id="name"
               name="name"
               required
               maxlength="200"
               autocomplete="off"
             ></label
+          >
+          <label for="task-summary"
+            >Task summary<input
+              id="task-summary"
+              name="summary"
+              required
+              maxlength="200"
+              autocomplete="off"
+              placeholder="What needs to be done?"
+            ></label
+          >
+          <label for="task-description"
+            >Description<textarea
+              id="task-description"
+              name="description"
+              rows="4"
+              maxlength="16000"
+              placeholder="Details, context, or preparation for this task"
+            ></textarea></label
           >
           <label for="item-id"
             >Item ID<input
@@ -229,6 +248,24 @@
               stay on a calendar cadence.
             </p>
           </fieldset>
+          <section
+            class="editor-section"
+            aria-labelledby="checklist-editor-title"
+          >
+            <div class="section-heading">
+              <h3 id="checklist-editor-title">Checklist</h3>
+              <button type="button" id="add-checklist-step" class="quiet small">
+                Add step
+              </button>
+            </div>
+            <p class="muted">
+              Steps track progress toward this task. Completing the maintenance
+              item starts a fresh checklist. Give work with its own schedule a
+              separate item.
+            </p>
+            <div id="checklist-rows"></div>
+            <p class="muted" id="checklist-editor-status" role="status"></p>
+          </section>
           <label for="instructions"
             >Instructions<textarea
               id="instructions"

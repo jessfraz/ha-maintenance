@@ -2,8 +2,9 @@ use chrono::NaiveDate;
 use home_maintenance::{
     api::{self, Context, Role, System},
     models::{
-        Actor, CompleteItem, Completion, CreateItem, Definition, ImportCatalog, Item, ItemId, Page,
-        Schedule, Summary, TimeZone, UpdateItem,
+        Actor, Change, ChecklistStep, CompleteItem, Completion, CreateItem, Definition,
+        ImportCatalog, Item, ItemId, Page, Schedule, SetChecklistStep, Summary, TimeZone,
+        UpdateItem,
     },
     store::Store,
 };
@@ -82,11 +83,23 @@ fn input(id: &str) -> CreateItem {
         due: NaiveDate::from_ymd_opt(2031, 2, 17).unwrap(),
         definition: Definition {
             name: "Example filter".into(),
+            summary: "Replace the example filter".into(),
+            description: Some("Replace the part and verify normal operation.".into()),
             timezone: TimeZone::try_from("Etc/UTC".to_owned()).unwrap(),
             location: None,
             group: None,
             schedule: Schedule::new(47, 0, 0).unwrap(),
             instructions: vec!["Replace the example filter.".into()],
+            checklist: vec![
+                ChecklistStep {
+                    id: Uuid::from_u128(1),
+                    summary: "Inspect the example part".into(),
+                },
+                ChecklistStep {
+                    id: Uuid::from_u128(2),
+                    summary: "Install the demonstration replacement".into(),
+                },
+            ],
             specs: vec![],
             resources: vec![],
             reorder_url: None,
@@ -109,6 +122,347 @@ async fn complete(f: &Fixture, item: &Item, key: &str) -> Response {
         .send()
         .await
         .unwrap()
+}
+
+async fn set_step(f: &Fixture, item: &Item, step_id: Uuid, completed: bool, key: &str) -> Response {
+    f.client
+        .put(format!(
+            "{}/v1/items/{}/checklist/{step_id}",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .header("Idempotency-Key", key)
+        .json(&SetChecklistStep {
+            occurrence_id: item.occurrence.id,
+            completed,
+        })
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn checklist_checks_are_replayable_and_only_parent_completion_advances_the_schedule() {
+    let f = Fixture::new().await;
+    let before = f.create("example-checklist").await;
+    let step = before.occurrence.checklist[0].id;
+    let endpoint = format!("{}/v1/items/example-checklist/checklist/{step}", f.origin);
+    let payload = SetChecklistStep {
+        occurrence_id: before.occurrence.id,
+        completed: true,
+    };
+    let unauthorized = f.client.put(&endpoint).json(&payload).send().await.unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let no_revision = f
+        .client
+        .put(&endpoint)
+        .bearer_auth(OWNER)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_revision.status(), StatusCode::PRECONDITION_REQUIRED);
+    let no_retry_key = f
+        .client
+        .put(&endpoint)
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", before.revision))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_retry_key.status(), StatusCode::BAD_REQUEST);
+    let (a, b) = tokio::join!(
+        set_step(&f, &before, step, true, "check"),
+        set_step(&f, &before, step, true, "check")
+    );
+    assert_eq!(a.status(), StatusCode::OK);
+    assert_eq!(b.status(), StatusCode::OK);
+    let checked: Item = a.json().await.unwrap();
+    let replayed: Item = b.json().await.unwrap();
+    assert_eq!(checked.occurrence.checklist, replayed.occurrence.checklist);
+    assert_eq!(checked.revision, before.revision + 1);
+    assert_eq!(checked.occurrence.id, before.occurrence.id);
+    assert_eq!(checked.occurrence.due, before.occurrence.due);
+    assert!(checked.last_completion.is_none());
+    assert!(checked.occurrence.checklist[1].completion.is_none());
+    let actor = &checked.occurrence.checklist[0]
+        .completion
+        .as_ref()
+        .unwrap()
+        .actor;
+    assert_eq!(actor.key(), "system:owner");
+    let summary = f.store.summary().await.unwrap();
+    assert_eq!(summary.completed, 0);
+
+    let unchanged: Item = set_step(&f, &checked, step, true, "check-no-op")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unchanged.revision, checked.revision);
+    assert_eq!(unchanged.occurrence.checklist, checked.occurrence.checklist);
+    assert_eq!(
+        set_step(&f, &checked, step, false, "check").await.status(),
+        StatusCode::CONFLICT
+    );
+    let undone: Item = set_step(&f, &checked, step, false, "uncheck")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(undone.occurrence.checklist[0].completion.is_none());
+    let checked: Item = set_step(&f, &undone, step, true, "recheck")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let after: Item = complete(&f, &checked, "complete-parent")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(after.occurrence.id, before.occurrence.id);
+    assert!(
+        after
+            .occurrence
+            .checklist
+            .iter()
+            .all(|step| step.completion.is_none())
+    );
+    let event = after.last_completion.as_ref().unwrap();
+    assert_eq!(event.checklist, checked.occurrence.checklist);
+    assert_eq!(f.store.summary().await.unwrap().completed, 1);
+
+    // A saved response for the old occurrence cannot apply its checks to the successor.
+    let old_response: Item = set_step(&f, &before, step, true, "check")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(old_response.occurrence.id, before.occurrence.id);
+    let current = f.get("example-checklist").await;
+    assert_eq!(current.occurrence.id, after.occurrence.id);
+    assert!(
+        current
+            .occurrence
+            .checklist
+            .iter()
+            .all(|step| step.completion.is_none())
+    );
+    let mut wrong_occurrence = current.clone();
+    wrong_occurrence.occurrence.id = before.occurrence.id;
+    assert_eq!(
+        set_step(&f, &wrong_occurrence, step, true, "stale-occurrence")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        set_step(&f, &current, Uuid::from_u128(999), true, "missing-step")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let archived = f
+        .store
+        .archive(&current.id, current.revision, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        set_step(&f, &archived, step, true, "archived-step")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn checklist_template_edits_reset_changed_work_and_preserve_historical_wording() {
+    let f = Fixture::new().await;
+    let item = f.create("example-template").await;
+    let item: Item = set_step(&f, &item, Uuid::from_u128(1), true, "first")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let checked: Item = set_step(&f, &item, Uuid::from_u128(2), true, "second")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let mut steps = checked.definition.checklist.clone();
+    steps[0].summary = "Inspect the replacement connection".into();
+    steps.push(ChecklistStep {
+        id: Uuid::from_u128(3),
+        summary: "Check normal operation".into(),
+    });
+    let patch = UpdateItem {
+        summary: Change(Some("Replace and verify the example filter".into())),
+        description: Change(Some(None)),
+        checklist: Change(Some(steps.clone())),
+        ..UpdateItem::default()
+    };
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/example-template", f.origin))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", checked.revision))
+        .json(&patch)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let edited: Item = response.json().await.unwrap();
+    assert_eq!(
+        edited.definition.summary,
+        "Replace and verify the example filter"
+    );
+    assert!(edited.definition.description.is_none());
+    assert_eq!(edited.occurrence.due, checked.occurrence.due);
+    assert!(edited.occurrence.checklist[0].completion.is_none());
+    assert_eq!(
+        edited.occurrence.checklist[1].completion,
+        checked.occurrence.checklist[1].completion
+    );
+    assert!(edited.occurrence.checklist[2].completion.is_none());
+
+    let mut duplicate = steps.clone();
+    duplicate.push(steps[0].clone());
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/example-template", f.origin))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", edited.revision))
+        .json(&UpdateItem {
+            checklist: Change(Some(duplicate)),
+            ..UpdateItem::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(f.get("example-template").await.revision, edited.revision);
+
+    let completed: Item = complete(&f, &edited, "complete-template")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let snapshot = completed
+        .last_completion
+        .as_ref()
+        .unwrap()
+        .checklist
+        .clone();
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/example-template", f.origin))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", completed.revision))
+        .json(&UpdateItem {
+            checklist: Change(Some(Vec::new())),
+            ..UpdateItem::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cleared: Item = response.json().await.unwrap();
+    assert!(cleared.occurrence.checklist.is_empty());
+    assert_eq!(
+        cleared.last_completion.as_ref().unwrap().checklist,
+        snapshot
+    );
+    let history = f.store.events(&cleared.id, None, 100).await.unwrap();
+    assert_eq!(history.items[0].checklist, snapshot);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn concurrent_steps_and_parent_completion_preserve_occurrence_ownership() {
+    let f = Fixture::new().await;
+    let before = f.create("example-race").await;
+    let (a, b) = tokio::join!(
+        set_step(&f, &before, Uuid::from_u128(1), true, "racing-step"),
+        complete(&f, &before, "racing-parent")
+    );
+    assert!(matches!(
+        (a.status(), b.status()),
+        (StatusCode::OK, StatusCode::PRECONDITION_FAILED)
+            | (StatusCode::PRECONDITION_FAILED, StatusCode::OK)
+    ));
+    let current = f.get("example-race").await;
+    let after = if a.status() == StatusCode::OK {
+        assert_eq!(current.occurrence.id, before.occurrence.id);
+        assert!(current.occurrence.checklist[0].completion.is_some());
+        complete(&f, &current, "finish-after-race")
+            .await
+            .json::<Item>()
+            .await
+            .unwrap()
+    } else {
+        current
+    };
+    assert_ne!(after.occurrence.id, before.occurrence.id);
+    assert!(
+        after
+            .occurrence
+            .checklist
+            .iter()
+            .all(|step| step.completion.is_none())
+    );
+    assert_eq!(f.store.summary().await.unwrap().completed, 1);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn concurrent_distinct_steps_require_refresh_instead_of_losing_a_check() {
+    let f = Fixture::new().await;
+    let before = f.create("example-step-race").await;
+    let (a, b) = tokio::join!(
+        set_step(&f, &before, Uuid::from_u128(1), true, "step-one"),
+        set_step(&f, &before, Uuid::from_u128(2), true, "step-two")
+    );
+    assert!(matches!(
+        (a.status(), b.status()),
+        (StatusCode::OK, StatusCode::PRECONDITION_FAILED)
+            | (StatusCode::PRECONDITION_FAILED, StatusCode::OK)
+    ));
+    let current = f.get("example-step-race").await;
+    assert_eq!(
+        current
+            .occurrence
+            .checklist
+            .iter()
+            .filter(|step| step.completion.is_some())
+            .count(),
+        1
+    );
+    let missing = current
+        .occurrence
+        .checklist
+        .iter()
+        .find(|step| step.completion.is_none())
+        .unwrap();
+    let after: Item = set_step(&f, &current, missing.id, true, "refreshed-step")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        after
+            .occurrence
+            .checklist
+            .iter()
+            .all(|step| step.completion.is_some())
+    );
+    assert_eq!(after.occurrence.id, before.occurrence.id);
+    assert_eq!(f.store.summary().await.unwrap().completed, 0);
+    f.finish().await;
 }
 
 #[tokio::test]
@@ -188,6 +542,11 @@ async fn concurrent_distinct_completions_commit_only_one_event() {
 async fn restart_and_cold_restore_keep_history_occurrences_and_idempotency() {
     let f = Fixture::new().await;
     let first = f.create("example-filter").await;
+    let first: Item = set_step(&f, &first, Uuid::from_u128(1), true, "durable-step")
+        .await
+        .json()
+        .await
+        .unwrap();
     let after: Item = complete(&f, &first, "completion")
         .await
         .json()
@@ -203,6 +562,16 @@ async fn restart_and_cold_restore_keep_history_occurrences_and_idempotency() {
         .unwrap();
     let item = restored.get(&first.id).await.unwrap();
     assert_eq!(item.occurrence.id, after.occurrence.id);
+    assert_eq!(
+        item.last_completion.as_ref().unwrap().checklist,
+        first.occurrence.checklist
+    );
+    assert!(
+        item.occurrence
+            .checklist
+            .iter()
+            .all(|step| step.completion.is_none())
+    );
     assert_eq!(
         item.last_completion.as_ref().unwrap().id,
         after.last_completion.as_ref().unwrap().id

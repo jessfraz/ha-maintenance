@@ -50,7 +50,9 @@ async def test_native_sensors_and_todo_list(hass: HomeAssistant, entry) -> None:
                     "uid": OCCURRENCE_ID,
                     "status": "needs_action",
                     "due": "2026-10-15",
-                    "description": "Turn off the appliance\nReplace the filter",
+                    "description": (
+                        "Instructions\n1. Turn off the appliance\n2. Replace the filter"
+                    ),
                 }
             ]
         }

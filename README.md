@@ -27,15 +27,23 @@ an image has been published.
 
 ## Maintenance items
 
-Each item has a stable ID, an IANA time zone, a due date, a calendar recurrence,
-and optional instructions, specifications, resource links, group, and location.
-Completing its current occurrence saves the actor and completion time and
-creates the next occurrence in the same SQLite transaction. Calendar months
-and years retain calendar behavior at month boundaries.
+Each item has a stable ID, a name for the thing being maintained, an action
+summary, an IANA time zone, a due date, and a calendar recurrence. For example,
+an item named "Example air filter" has the summary "Replace the example air
+filter". A description, checklist, instructions, specifications, resource
+links, group, and location are optional.
+
+Checklist steps belong to the current occurrence. Checking a step records its
+actor and time without completing the item. Explicitly completing the item
+saves a snapshot of its checklist, including unchecked steps, and creates the
+next occurrence with every step unchecked in the same SQLite transaction.
+Keeping a template step's ID and wording preserves its current check; changing
+its wording clears that check. Completed history stays unchanged. Calendar
+months and years retain calendar behavior at month boundaries.
 
 The dashboard orders items by due date. Open `/items/<item-id>` for the current
-occurrence, instructions, links, and history. NFC tags should use the stable,
-authenticated Home Assistant app route, for example:
+occurrence, description, checklist, instructions, links, and history. NFC tags
+should use the stable, authenticated Home Assistant app route, for example:
 
 ```text
 https://home-assistant.example/app/<repository-app-slug>/items/example-air-filter
@@ -55,23 +63,32 @@ OpenAPI document with `just openapi`.
 | List or create items | `GET /v1/items`, `POST /v1/items` |
 | Import a catalog atomically | `POST /v1/imports` |
 | Read or update an item | `GET /v1/items/{id}`, `PATCH /v1/items/{id}` |
+| Check or uncheck a current step | `PUT /v1/items/{id}/checklist/{step_id}` |
 | Complete the current occurrence | `POST /v1/items/{id}/completions` |
 | Read completion history | `GET /v1/items/{id}/events` |
 | Archive or restore an item | `PUT /v1/items/{id}/archive`, `DELETE /v1/items/{id}/archive` |
 | Counts and authenticated service status | `GET /v1/summary`, `GET /v1/system` |
 
 Use bearer authentication for `/v1` routes. Mutations of existing items require
-`If-Match` with the item's ETag. Creation and completion require a
-stable `Idempotency-Key`. Repeating an accepted request returns its saved
+`If-Match` with the item's ETag. Creation, step changes, and completion require
+a stable `Idempotency-Key`. Repeating an accepted request returns its saved
 result; reusing a key for a different request is a conflict. Completion also
 names the exact current occurrence, so a second tap cannot complete the next
-occurrence. Lists use bounded cursor pagination.
+occurrence. A step change sends `{ "occurrence_id": "UUID", "completed": true }`
+or `false` to undo it. Authenticated users can change steps and complete items;
+editing definitions requires administrator access. Archived items and stale
+occurrences cannot be checked or completed. Lists use bounded cursor pagination.
 
 Import accepts `{ "items": [...] }` with the same item shape as creation.
 [`config/items.example.json`](config/items.example.json) is entirely fictional;
 [`config/items.schema.json`](config/items.schema.json) describes that format.
 The import validates every item and commits the whole catalog atomically.
 Existing IDs conflict. Omitting an item never deletes or archives it.
+The required `summary` and each checklist step's summary must be nonblank and
+fit within 200 UTF-8 bytes. An optional description fits within 16,000 UTF-8
+bytes and must be nonblank when supplied. A checklist defaults to empty and
+supports up to 100 steps, each with a unique UUID that remains stable when
+editing its text.
 
 ## Development
 
@@ -88,8 +105,9 @@ just container
 `just check` runs privacy and version checks, formatting, strict Clippy, Rust
 tests, and Home Assistant tests against the actual compiled Rust service.
 `just container` builds and tests the native image, authentication, process
-ownership, persisted credentials, recurrence, restart, and a cold-volume
-backup/restore. CI runs the container checks natively on amd64 and arm64.
+ownership, persisted credentials and checklists, completion history,
+recurrence, restart, and a cold-volume backup/restore. CI runs the container
+checks natively on amd64 and arm64.
 
 For a standalone development service, create an owner token in your password
 manager and supply it through `MAINTENANCE_API_TOKEN`, then run:

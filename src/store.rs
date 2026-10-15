@@ -13,7 +13,7 @@ use crate::{
     error::Error,
     models::{
         Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Occurrence, Page,
-        Summary, UpdateItem,
+        SetChecklistStep, StepCompletion, Summary, UpdateItem,
     },
 };
 
@@ -24,20 +24,21 @@ pub struct Store {
 
 // Definitions are one typed, versioned document. Indexed lifecycle/order fields
 // live in columns; history is append-only and never hidden inside that document.
-const EVENT_LIST: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due FROM completions WHERE item_id=? ORDER BY sequence DESC LIMIT ?";
-const EVENT_LIST_NEXT: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due FROM completions WHERE item_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?";
+const EVENT_LIST: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist FROM completions WHERE item_id=? ORDER BY sequence DESC LIMIT ?";
+const EVENT_LIST_NEXT: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist FROM completions WHERE item_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?";
 const IDEMPOTENCY_GET: &str =
     "SELECT fingerprint,response FROM idempotency WHERE actor=? AND key=?";
 const IDEMPOTENCY_INSERT: &str =
     "INSERT INTO idempotency(actor,key,fingerprint,response) VALUES(?,?,?,?)";
 const ITEM_INSERT: &str =
-    "INSERT INTO items(id,definition,revision,occurrence_id,due) VALUES(?,?,1,?,?)";
-const ITEM_UPDATE: &str = "UPDATE items SET definition=?,due=?,revision=? WHERE id=?";
+    "INSERT INTO items(id,definition,revision,occurrence_id,due,checklist) VALUES(?,?,1,?,?,?)";
+const ITEM_UPDATE: &str = "UPDATE items SET definition=?,due=?,checklist=?,revision=? WHERE id=?";
+const CHECKLIST_UPDATE: &str = "UPDATE items SET checklist=?,revision=? WHERE id=?";
 const ITEM_ARCHIVE: &str = "UPDATE items SET archived=?,revision=? WHERE id=?";
 const DATABASE_NOW: &str = "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')";
-const COMPLETION_INSERT: &str = "INSERT INTO completions(id,item_id,occurrence_id,completed_at,actor,previous_due,next_due) VALUES (?,?,?,?,?,?,?)";
+const COMPLETION_INSERT: &str = "INSERT INTO completions(id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist) VALUES (?,?,?,?,?,?,?,?)";
 const OCCURRENCE_ADVANCE: &str =
-    "UPDATE items SET due=?,occurrence_id=?,revision=?,last_completion_id=? WHERE id=?";
+    "UPDATE items SET due=?,occurrence_id=?,revision=?,last_completion_id=?,checklist=? WHERE id=?";
 const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 ORDER BY due,id LIMIT 200";
 const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND (due,id)>(?,?) ORDER BY due,id LIMIT 200";
 const COMPLETION_COUNT: &str = "SELECT count(*) FROM completions";
@@ -49,15 +50,17 @@ struct ItemRow {
     archived: bool,
     occurrence_id: String,
     due: String,
+    checklist: String,
     completion_id: Option<String>,
     completed_occurrence: Option<String>,
     completed_at: Option<String>,
     actor: Option<String>,
     previous_due: Option<String>,
     next_due: Option<String>,
+    completion_checklist: Option<String>,
 }
 macro_rules! item_select {
-    () => { "SELECT i.id,i.definition,i.revision,i.archived,i.occurrence_id,i.due,c.id AS completion_id,c.occurrence_id AS completed_occurrence,c.completed_at,c.actor,c.previous_due,c.next_due FROM items i LEFT JOIN completions c ON c.sequence=i.last_completion_id" };
+    () => { "SELECT i.id,i.definition,i.revision,i.archived,i.occurrence_id,i.due,i.checklist,c.id AS completion_id,c.occurrence_id AS completed_occurrence,c.completed_at,c.actor,c.previous_due,c.next_due,c.checklist AS completion_checklist FROM items i LEFT JOIN completions c ON c.sequence=i.last_completion_id" };
 }
 const ITEM_GET: &str = concat!(item_select!(), " WHERE i.id=?");
 const ITEM_LIST: &str = concat!(
@@ -78,6 +81,7 @@ struct CompletionRow {
     actor: String,
     previous_due: String,
     next_due: String,
+    checklist: String,
 }
 
 fn corrupt() -> Error {
@@ -105,8 +109,9 @@ impl TryFrom<ItemRow> for Item {
             row.actor,
             row.previous_due,
             row.next_due,
+            row.completion_checklist,
         ) {
-            (None, None, None, None, None, None) => None,
+            (None, None, None, None, None, None, None) => None,
             (
                 Some(event_id),
                 Some(occurrence),
@@ -114,6 +119,7 @@ impl TryFrom<ItemRow> for Item {
                 Some(actor),
                 Some(previous),
                 Some(next),
+                Some(checklist),
             ) => Some(Completion {
                 id: parse_uuid(&event_id)?,
                 item_id: id.clone(),
@@ -122,6 +128,7 @@ impl TryFrom<ItemRow> for Item {
                 actor: serde_json::from_str(&actor)?,
                 previous_due: parse_date(&previous)?,
                 next_due: parse_date(&next)?,
+                checklist: serde_json::from_str(&checklist)?,
             }),
             _ => return Err(corrupt()),
         };
@@ -133,6 +140,7 @@ impl TryFrom<ItemRow> for Item {
             occurrence: Occurrence {
                 id: parse_uuid(&row.occurrence_id)?,
                 due: parse_date(&row.due)?,
+                checklist: serde_json::from_str(&row.checklist)?,
             },
             last_completion,
         })
@@ -149,6 +157,7 @@ impl TryFrom<CompletionRow> for Completion {
             actor: serde_json::from_str(&row.actor)?,
             previous_due: parse_date(&row.previous_due)?,
             next_due: parse_date(&row.next_due)?,
+            checklist: serde_json::from_str(&row.checklist)?,
         })
     }
 }
@@ -340,10 +349,12 @@ impl Store {
         let mut item = get_item(&mut transaction, id).await?;
         check_revision(&item, revision)?;
         input.apply(&mut item.definition, &mut item.occurrence.due)?;
+        item.occurrence.checklist = item.definition.checklist_state(&item.occurrence.checklist);
         let revision = next_revision(item.revision)?;
         sqlx::query(ITEM_UPDATE)
             .bind(serde_json::to_string(&item.definition)?)
             .bind(item.occurrence.due.to_string())
+            .bind(serde_json::to_string(&item.occurrence.checklist)?)
             .bind(revision)
             .bind(id.as_ref())
             .execute(&mut *transaction)
@@ -407,6 +418,7 @@ impl Store {
             .bind(serde_json::to_string(actor)?)
             .bind(item.occurrence.due.to_string())
             .bind(next_due.to_string())
+            .bind(serde_json::to_string(&item.occurrence.checklist)?)
             .execute(&mut *transaction)
             .await?
             .last_insert_rowid();
@@ -415,9 +427,65 @@ impl Store {
             .bind(Uuid::now_v7().to_string())
             .bind(next_revision(item.revision)?)
             .bind(sequence)
+            .bind(serde_json::to_string(
+                &item.definition.checklist_state(&[]),
+            )?)
             .bind(id.as_ref())
             .execute(&mut *transaction)
             .await?;
+        let result = get_item(&mut transaction, id).await?;
+        save_replay(&mut transaction, actor, key, &fingerprint, &result).await?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn set_checklist_step(
+        &self,
+        id: &ItemId,
+        step_id: Uuid,
+        revision: i64,
+        input: SetChecklistStep,
+        actor: &Actor,
+        key: &str,
+    ) -> Result<Item, Error> {
+        let fingerprint = fingerprint("checklist", &(id, step_id, revision, &input))?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(item) = replay(&mut transaction, actor, key, &fingerprint).await? {
+            return Ok(item);
+        }
+        let mut item = get_item(&mut transaction, id).await?;
+        check_revision(&item, revision)?;
+        if item.archived {
+            return Err(Error::Conflict("archived items cannot be checked"));
+        }
+        if item.occurrence.id != input.occurrence_id {
+            return Err(Error::Conflict("this occurrence is no longer current"));
+        }
+        let step = item
+            .occurrence
+            .checklist
+            .iter_mut()
+            .find(|step| step.id == step_id)
+            .ok_or(Error::NotFound)?;
+        if step.completion.is_some() != input.completed {
+            step.completion = if input.completed {
+                let now: String = sqlx::query_scalar(DATABASE_NOW)
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                Some(StepCompletion {
+                    completed_at: parse_time(&now)?,
+                    actor: actor.clone(),
+                })
+            } else {
+                None
+            };
+            sqlx::query(CHECKLIST_UPDATE)
+                .bind(serde_json::to_string(&item.occurrence.checklist)?)
+                .bind(next_revision(item.revision)?)
+                .bind(id.as_ref())
+                .execute(&mut *transaction)
+                .await?;
+        }
         let result = get_item(&mut transaction, id).await?;
         save_replay(&mut transaction, actor, key, &fingerprint, &result).await?;
         transaction.commit().await?;
@@ -509,6 +577,9 @@ async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> R
         .bind(serde_json::to_string(&input.definition)?)
         .bind(Uuid::now_v7().to_string())
         .bind(input.due.to_string())
+        .bind(serde_json::to_string(
+            &input.definition.checklist_state(&[]),
+        )?)
         .execute(connection)
         .await;
     match result {
@@ -724,6 +795,22 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(details.iter().all(|line| line.starts_with("SEARCH")));
         evidence.push(("item and latest completion", details));
+        let mut checklist_update = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+        checklist_update.push(CHECKLIST_UPDATE);
+        let rows = checklist_update
+            .build()
+            .bind(serde_json::to_string(&latest.occurrence.checklist).unwrap())
+            .bind(42_i64)
+            .bind(id.as_ref())
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        let details = rows
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>();
+        assert!(details.iter().all(|line| line.starts_with("SEARCH")));
+        evidence.push(("checklist update", details));
         let mut events = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
         events.push(EVENT_LIST_NEXT);
         let plan = events
@@ -814,6 +901,8 @@ mod tests {
             Blob(Vec<u8>),
         }
         let definition = serde_json::to_string(&seed.items[0].definition).unwrap();
+        let checklist =
+            serde_json::to_string(&seed.items[0].definition.checklist_state(&[])).unwrap();
         let actor_json = serde_json::to_string(&actor).unwrap();
         let response = serde_json::to_string(&item).unwrap();
         let event_id = Uuid::now_v7().to_string();
@@ -828,6 +917,7 @@ mod tests {
                     Text(definition.clone()),
                     Text(occurrence.clone()),
                     Text("2031-02-17".into()),
+                    Text(checklist.clone()),
                 ],
             ),
             (
@@ -836,6 +926,16 @@ mod tests {
                 vec![
                     Text(definition),
                     Text("2031-02-17".into()),
+                    Text(checklist.clone()),
+                    Integer(42),
+                    Text(id.as_ref().into()),
+                ],
+            ),
+            (
+                "update checklist",
+                CHECKLIST_UPDATE,
+                vec![
+                    Text(checklist.clone()),
                     Integer(42),
                     Text(id.as_ref().into()),
                 ],
@@ -856,6 +956,7 @@ mod tests {
                     Text(actor_json),
                     Text("2031-02-17".into()),
                     Text("2031-04-05".into()),
+                    Text(checklist.clone()),
                 ],
             ),
             (
@@ -866,6 +967,7 @@ mod tests {
                     Text(occurrence),
                     Integer(42),
                     Integer(20),
+                    Text(checklist),
                     Text(id.as_ref().into()),
                 ],
             ),

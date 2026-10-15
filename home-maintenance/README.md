@@ -1,6 +1,7 @@
 # Maintenance
 
-Local maintenance schedules, completion history, and a Home Assistant dashboard.
+Local maintenance schedules, occurrence checklists, completion history, and a
+Home Assistant dashboard.
 A Rust service owns SQLite state; the paired integration exposes sensors,
 actions, and a native to-do list.
 

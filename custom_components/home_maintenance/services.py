@@ -1,7 +1,7 @@
 """Native completion actions using the same versioned Rust contract."""
 
 import json
-from typing import TypedDict
+from typing import Literal, TypedDict
 from uuid import UUID, uuid4
 
 import probatio as vol
@@ -34,6 +34,22 @@ class CompletionResult(TypedDict):
     due: str
 
 
+class ChecklistStepResult(CompletionResult):
+    """The updated step on the same parent occurrence."""
+
+    step_id: str
+    completed: bool
+
+
+class CompletionRequest(TypedDict):
+    occurrence_id: str
+
+
+class ChecklistStepRequest(TypedDict):
+    occurrence_id: str
+    completed: bool
+
+
 async def async_actor(hass: HomeAssistant, context: Context) -> Actor:
     """Resolve human identity from HA authentication or attribute system work."""
     if context.user_id is None:
@@ -58,16 +74,18 @@ def check_response(response: BackendResponse) -> None:
     )
 
 
-async def async_complete(
+async def _async_mutate_occurrence(
     coordinator: MaintenanceCoordinator,
     item_id: str,
-    occurrence_id: UUID,
     actor: Actor,
+    method: Literal["POST", "PUT"],
+    action: str,
+    payload: CompletionRequest | ChecklistStepRequest,
     *,
     if_match: str | None = None,
     idempotency_key: str | None = None,
 ) -> MaintenanceItem:
-    """Complete exactly the occurrence the caller saw, never a future one."""
+    """Apply one versioned mutation without retrying against a newer occurrence."""
     path = f"/v1/items/{item_id}"
     try:
         if if_match is None:
@@ -77,10 +95,10 @@ async def async_complete(
             if not if_match:
                 raise HomeAssistantError("The backend omitted the item version")
         response = await coordinator.client.request(
-            "POST",
-            f"{path}/completions",
+            method,
+            f"{path}/{action}",
             actor=actor,
-            body=json.dumps({"occurrence_id": str(occurrence_id)}).encode(),
+            body=json.dumps(payload).encode(),
             headers={
                 "If-Match": if_match,
                 "Idempotency-Key": idempotency_key or str(uuid4()),
@@ -97,10 +115,63 @@ async def async_complete(
     return item
 
 
+async def async_complete(
+    coordinator: MaintenanceCoordinator,
+    item_id: str,
+    occurrence_id: UUID,
+    actor: Actor,
+    *,
+    if_match: str | None = None,
+    idempotency_key: str | None = None,
+) -> MaintenanceItem:
+    """Complete exactly the occurrence the caller saw, never a future one."""
+    payload: CompletionRequest = {"occurrence_id": str(occurrence_id)}
+    return await _async_mutate_occurrence(
+        coordinator,
+        item_id,
+        actor,
+        "POST",
+        "completions",
+        payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+    )
+
+
+async def async_set_checklist_step(
+    coordinator: MaintenanceCoordinator,
+    item_id: str,
+    occurrence_id: UUID,
+    step_id: UUID,
+    completed: bool,
+    actor: Actor,
+    *,
+    if_match: str | None = None,
+    idempotency_key: str | None = None,
+) -> MaintenanceItem:
+    """Update one real step while leaving the parent due date and identity intact."""
+    payload: ChecklistStepRequest = {
+        "occurrence_id": str(occurrence_id),
+        "completed": completed,
+    }
+    return await _async_mutate_occurrence(
+        coordinator,
+        item_id,
+        actor,
+        "PUT",
+        f"checklist/{step_id}",
+        payload,
+        if_match=if_match,
+        idempotency_key=idempotency_key,
+    )
+
+
 def async_register_services(hass: HomeAssistant) -> None:
     """Register completion even when an entry is temporarily unavailable."""
 
-    async def handle(call: ServiceCall) -> CompletionResult | None:
+    async def handle(
+        call: ServiceCall,
+    ) -> CompletionResult | ChecklistStepResult | None:
         actor = await async_actor(hass, call.context)
         coordinator = loaded_coordinator(hass)
         if coordinator is None:
@@ -112,21 +183,51 @@ def async_register_services(hass: HomeAssistant) -> None:
             occurrence_id = UUID(call.data["occurrence_id"])
         except ValueError as err:
             raise ServiceValidationError("Invalid occurrence ID") from err
-        item = await async_complete(
-            coordinator,
-            item_id,
-            occurrence_id,
-            actor,
-            if_match=call.data.get("if_match"),
-            idempotency_key=call.data.get("idempotency_key"),
-        )
+        if call.service == "set_checklist_step":
+            try:
+                step_id = UUID(call.data["step_id"])
+            except ValueError as err:
+                raise ServiceValidationError("Invalid checklist step ID") from err
+            item = await async_set_checklist_step(
+                coordinator,
+                item_id,
+                occurrence_id,
+                step_id,
+                call.data["completed"],
+                actor,
+                if_match=call.data.get("if_match"),
+                idempotency_key=call.data.get("idempotency_key"),
+            )
+        else:
+            item = await async_complete(
+                coordinator,
+                item_id,
+                occurrence_id,
+                actor,
+                if_match=call.data.get("if_match"),
+                idempotency_key=call.data.get("idempotency_key"),
+            )
         if call.return_response:
-            return {
+            result: CompletionResult = {
                 "id": item.id,
                 "revision": item.revision,
                 "occurrence_id": str(item.occurrence_id),
                 "due": item.due.isoformat(),
             }
+            if call.service == "set_checklist_step":
+                step = next(
+                    (step for step in item.checklist if step.id == step_id), None
+                )
+                if step is None:
+                    raise HomeAssistantError(
+                        "The backend omitted the updated checklist step"
+                    )
+                return ChecklistStepResult(
+                    **result,
+                    step_id=str(step.id),
+                    completed=step.completion is not None,
+                )
+            return result
         return None
 
     hass.services.async_register(
@@ -137,6 +238,22 @@ def async_register_services(hass: HomeAssistant) -> None:
             {
                 vol.Required("item_id"): str,
                 vol.Required("occurrence_id"): str,
+                vol.Optional("if_match"): str,
+                vol.Optional("idempotency_key"): str,
+            }
+        ),
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "set_checklist_step",
+        handle,
+        schema=vol.Schema(
+            {
+                vol.Required("item_id"): str,
+                vol.Required("occurrence_id"): str,
+                vol.Required("step_id"): str,
+                vol.Required("completed"): bool,
                 vol.Optional("if_match"): str,
                 vol.Optional("idempotency_key"): str,
             }

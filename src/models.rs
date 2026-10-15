@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Datelike, Days, Months, NaiveDate, Utc};
 use chrono_tz::Tz;
 use schemars::{JsonSchema, schema::Schema};
@@ -126,9 +128,34 @@ pub struct Resource {
     pub url: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChecklistStep {
+    pub id: Uuid,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StepCompletion {
+    pub completed_at: DateTime<Utc>,
+    pub actor: Actor,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChecklistStepState {
+    pub id: Uuid,
+    pub summary: String,
+    pub completion: Option<StepCompletion>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Definition {
     pub name: String,
+    pub summary: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub timezone: TimeZone,
     #[serde(default)]
     pub location: Option<String>,
@@ -137,6 +164,8 @@ pub struct Definition {
     pub schedule: Schedule,
     #[serde(default)]
     pub instructions: Vec<String>,
+    #[serde(default)]
+    pub checklist: Vec<ChecklistStep>,
     #[serde(default)]
     pub specs: Vec<Spec>,
     #[serde(default)]
@@ -147,13 +176,28 @@ pub struct Definition {
 impl Definition {
     pub fn validate(&self) -> Result<(), Error> {
         text(&self.name, 200)?;
+        text(&self.summary, 200)?;
+        if let Some(description) = &self.description {
+            text(description, 16_000)?;
+        }
         for value in [&self.location, &self.group].into_iter().flatten() {
             text(value, 200)?;
         }
-        if self.instructions.len() > 100 || self.specs.len() > 100 || self.resources.len() > 100 {
+        if self.instructions.len() > 100
+            || self.checklist.len() > 100
+            || self.specs.len() > 100
+            || self.resources.len() > 100
+        {
             return Err(Error::Invalid(
-                "at most 100 instructions, specs or links per item",
+                "at most 100 instructions, checklist steps, specs or links per item",
             ));
+        }
+        let mut step_ids = BTreeSet::new();
+        for step in &self.checklist {
+            text(&step.summary, 200)?;
+            if !step_ids.insert(step.id) {
+                return Err(Error::Invalid("checklist step ids must be unique"));
+            }
         }
         for instruction in &self.instructions {
             text(instruction, 2_000)?;
@@ -170,6 +214,22 @@ impl Definition {
             url(value)?;
         }
         Ok(())
+    }
+
+    /// Edits preserve checks only for the same step and wording. New work must
+    /// not inherit a check recorded for a different instruction.
+    pub fn checklist_state(&self, previous: &[ChecklistStepState]) -> Vec<ChecklistStepState> {
+        self.checklist
+            .iter()
+            .map(|step| ChecklistStepState {
+                id: step.id,
+                summary: step.summary.clone(),
+                completion: previous
+                    .iter()
+                    .find(|state| state.id == step.id && state.summary == step.summary)
+                    .and_then(|state| state.completion.clone()),
+            })
+            .collect()
     }
 }
 fn text(value: &str, maximum: usize) -> Result<(), Error> {
@@ -269,6 +329,10 @@ pub struct UpdateItem {
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub name: Change<String>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
+    pub summary: Change<String>,
+    #[serde(default, skip_serializing_if = "Change::is_missing")]
+    pub description: Change<Option<String>>,
+    #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub timezone: Change<TimeZone>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub location: Change<Option<String>>,
@@ -281,6 +345,8 @@ pub struct UpdateItem {
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub instructions: Change<Vec<String>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
+    pub checklist: Change<Vec<ChecklistStep>>,
+    #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub specs: Change<Vec<Spec>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub resources: Change<Vec<Resource>>,
@@ -290,12 +356,15 @@ pub struct UpdateItem {
 impl UpdateItem {
     pub fn apply(self, definition: &mut Definition, due: &mut NaiveDate) -> Result<(), Error> {
         self.name.apply(&mut definition.name);
+        self.summary.apply(&mut definition.summary);
+        self.description.apply(&mut definition.description);
         self.timezone.apply(&mut definition.timezone);
         self.location.apply(&mut definition.location);
         self.group.apply(&mut definition.group);
         self.schedule.apply(&mut definition.schedule);
         self.due.apply(due);
         self.instructions.apply(&mut definition.instructions);
+        self.checklist.apply(&mut definition.checklist);
         self.specs.apply(&mut definition.specs);
         self.resources.apply(&mut definition.resources);
         self.reorder_url.apply(&mut definition.reorder_url);
@@ -303,13 +372,13 @@ impl UpdateItem {
         validate_date(*due)
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Actor {
     User { id: String, name: String },
     System { id: SystemActor, name: String },
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum SystemActor {
     #[serde(rename = "owner")]
     Owner,
@@ -335,6 +404,7 @@ impl Actor {
 pub struct Occurrence {
     pub id: Uuid,
     pub due: NaiveDate,
+    pub checklist: Vec<ChecklistStepState>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Completion {
@@ -345,6 +415,7 @@ pub struct Completion {
     pub actor: Actor,
     pub previous_due: NaiveDate,
     pub next_due: NaiveDate,
+    pub checklist: Vec<ChecklistStepState>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Item {
@@ -360,6 +431,12 @@ pub struct Item {
 #[serde(deny_unknown_fields)]
 pub struct CompleteItem {
     pub occurrence_id: Uuid,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetChecklistStep {
+    pub occurrence_id: Uuid,
+    pub completed: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -433,6 +510,27 @@ mod tests {
         for item in catalog.items {
             item.validate().unwrap();
         }
-        assert!(serde_json::from_str::<CreateItem>(r#"{"id":"example","name":"Example","due":"2031-01-01","timezone":"Etc/UTC","schedule":{"days":1},"actor":"forged"}"#).is_err());
+        assert!(serde_json::from_str::<CreateItem>(r#"{"id":"example","name":"Example","summary":"Inspect the example","due":"2031-01-01","timezone":"Etc/UTC","schedule":{"days":1},"actor":"forged"}"#).is_err());
+    }
+
+    #[test]
+    fn summaries_and_descriptions_have_explicit_text_bounds() {
+        let catalog: crate::models::ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let mut item = catalog.items[0].clone();
+        item.definition.summary = "x".repeat(200);
+        item.definition.description = Some("x".repeat(16_000));
+        item.validate().unwrap();
+        item.definition.summary.push('x');
+        assert!(item.validate().is_err());
+        item.definition.summary = "Inspect the example".into();
+        item.definition.description.as_mut().unwrap().push('x');
+        assert!(item.validate().is_err());
+        for description in [" ", "unsafe\u{0000}text"] {
+            item.definition.description = Some(description.into());
+            assert!(item.validate().is_err());
+        }
+        item.definition.description = None;
+        item.validate().unwrap();
     }
 }

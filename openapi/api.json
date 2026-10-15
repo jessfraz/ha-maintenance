@@ -91,6 +91,48 @@
         ],
         "type": "string"
       },
+      "ChecklistStep": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ChecklistStepState": {
+        "additionalProperties": false,
+        "properties": {
+          "completion": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/StepCompletion"
+              }
+            ],
+            "nullable": true
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "summary"
+        ],
+        "type": "object"
+      },
       "CompleteItem": {
         "additionalProperties": false,
         "properties": {
@@ -108,6 +150,12 @@
         "properties": {
           "actor": {
             "$ref": "#/components/schemas/Actor"
+          },
+          "checklist": {
+            "items": {
+              "$ref": "#/components/schemas/ChecklistStepState"
+            },
+            "type": "array"
           },
           "completed_at": {
             "format": "date-time",
@@ -135,6 +183,7 @@
         },
         "required": [
           "actor",
+          "checklist",
           "completed_at",
           "id",
           "item_id",
@@ -146,6 +195,18 @@
       },
       "CreateItem": {
         "properties": {
+          "checklist": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChecklistStep"
+            },
+            "type": "array"
+          },
+          "description": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
           "due": {
             "format": "date",
             "type": "string"
@@ -195,6 +256,9 @@
             },
             "type": "array"
           },
+          "summary": {
+            "type": "string"
+          },
           "timezone": {
             "$ref": "#/components/schemas/TimeZone"
           }
@@ -204,6 +268,7 @@
           "id",
           "name",
           "schedule",
+          "summary",
           "timezone"
         ],
         "type": "object"
@@ -266,6 +331,18 @@
           "archived": {
             "type": "boolean"
           },
+          "checklist": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ChecklistStep"
+            },
+            "type": "array"
+          },
+          "description": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
           "group": {
             "default": null,
             "nullable": true,
@@ -326,6 +403,9 @@
             },
             "type": "array"
           },
+          "summary": {
+            "type": "string"
+          },
           "timezone": {
             "$ref": "#/components/schemas/TimeZone"
           }
@@ -337,6 +417,7 @@
           "occurrence",
           "revision",
           "schedule",
+          "summary",
           "timezone"
         ],
         "type": "object"
@@ -347,6 +428,12 @@
       },
       "Occurrence": {
         "properties": {
+          "checklist": {
+            "items": {
+              "$ref": "#/components/schemas/ChecklistStepState"
+            },
+            "type": "array"
+          },
           "due": {
             "format": "date",
             "type": "string"
@@ -357,6 +444,7 @@
           }
         },
         "required": [
+          "checklist",
           "due",
           "id"
         ],
@@ -487,6 +575,23 @@
         ],
         "type": "object"
       },
+      "SetChecklistStep": {
+        "additionalProperties": false,
+        "properties": {
+          "completed": {
+            "type": "boolean"
+          },
+          "occurrence_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "completed",
+          "occurrence_id"
+        ],
+        "type": "object"
+      },
       "Spec": {
         "additionalProperties": false,
         "properties": {
@@ -500,6 +605,23 @@
         "required": [
           "label",
           "value"
+        ],
+        "type": "object"
+      },
+      "StepCompletion": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "completed_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "completed_at"
         ],
         "type": "object"
       },
@@ -566,6 +688,16 @@
       "UpdateItem": {
         "additionalProperties": false,
         "properties": {
+          "checklist": {
+            "items": {
+              "$ref": "#/components/schemas/ChecklistStep"
+            },
+            "type": "array"
+          },
+          "description": {
+            "nullable": true,
+            "type": "string"
+          },
           "due": {
             "format": "date",
             "type": "string"
@@ -606,6 +738,9 @@
             },
             "type": "array"
           },
+          "summary": {
+            "type": "string"
+          },
           "timezone": {
             "$ref": "#/components/schemas/TimeZone2"
           }
@@ -615,7 +750,7 @@
     }
   },
   "info": {
-    "description": "Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates and completions require Idempotency-Key; item mutations require the current quoted If-Match revision.",
+    "description": "Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates, completions and checklist changes require Idempotency-Key; item mutations require the current quoted If-Match revision.",
     "title": "Maintenance API",
     "version": "0.1.0"
   },
@@ -1218,6 +1353,78 @@
             "$ref": "#/components/responses/Error"
           }
         },
+        "tags": [
+          "items"
+        ]
+      }
+    },
+    "/v1/items/{id}/checklist/{step_id}": {
+      "put": {
+        "operationId": "checklist_step_set",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ItemId"
+            }
+          },
+          {
+            "in": "path",
+            "name": "step_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetChecklistStep"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Item"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Check one step of the current occurrence without advancing its schedule.",
         "tags": [
           "items"
         ]

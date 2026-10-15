@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+from uuid import UUID
 
 # Build environments are deliberately excluded from the worktree scan. Tracked
 # copies remain subject to the history scan, including files under these names.
@@ -151,6 +152,22 @@ def fictional_catalog(data: bytes) -> bool:
         except ValueError:
             return False
 
+    def example_text(value: object, maximum: int) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            size = len(value.encode())
+        except UnicodeEncodeError:
+            return False
+        return (
+            size <= maximum
+            and re.search(r"\bexample\b", value, re.IGNORECASE) is not None
+            and not any(
+                (ord(char) < 32 or 127 <= ord(char) <= 159) and char not in "\n\t"
+                for char in value
+            )
+        )
+
     for item in catalog["items"]:
         if not isinstance(item, dict):
             return False
@@ -160,6 +177,33 @@ def fictional_catalog(data: bytes) -> bool:
             "Example "
         ):
             return False
+        # Historical examples predate summaries and checklists. When supplied,
+        # their new free-text fields must also remain explicitly fictional.
+        if "summary" in item and not example_text(item["summary"], 200):
+            return False
+        if item.get("description") is not None and not example_text(
+            item["description"], 16_000
+        ):
+            return False
+        checklist = item.get("checklist", [])
+        if not isinstance(checklist, list) or len(checklist) > 100:
+            return False
+        step_ids: set[UUID] = set()
+        for step in checklist:
+            if (
+                not isinstance(step, dict)
+                or set(step) != {"id", "summary"}
+                or not isinstance(step["id"], str)
+                or not example_text(step["summary"], 200)
+            ):
+                return False
+            try:
+                step_id = UUID(step["id"])
+            except ValueError:
+                return False
+            if step_id in step_ids:
+                return False
+            step_ids.add(step_id)
         if item.get("location") is not None and (
             not isinstance(item["location"], str)
             or not item["location"].startswith("Example ")

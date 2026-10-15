@@ -19,6 +19,8 @@ restored_volume="$container-restored"
 # Fictional, disposable credentials. No provider or Home Assistant is contacted.
 token='container-smoke-owner-fixture-only'
 integration_token='container-smoke-integration-fixture-only'
+step_id='30000000-0000-4000-8000-000000000001'
+other_step_id='30000000-0000-4000-8000-000000000002'
 
 cleanup() {
     status=$?
@@ -91,15 +93,133 @@ etag() {
     awk 'tolower($1) == "etag:" {gsub("\r", "", $2); print $2}' "$scratch/headers"
 }
 
+check_item_contract() {
+    python3 - "$scratch" "$1" "$occurrence" "${next_occurrence:-}" "$step_id" "$other_step_id" <<'PY'
+import json
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Literal, TypedDict
+from uuid import UUID
+
+
+class Actor(TypedDict):
+    kind: Literal["user", "system"]
+    id: str
+    name: str
+
+
+class StepCompletion(TypedDict):
+    completed_at: str
+    actor: Actor
+
+
+class Step(TypedDict):
+    id: str
+    summary: str
+    completion: StepCompletion | None
+
+
+class Occurrence(TypedDict):
+    id: str
+    due: str
+    checklist: list[Step]
+
+
+class Completion(TypedDict):
+    occurrence_id: str
+    completed_at: str
+    previous_due: str
+    next_due: str
+    checklist: list[Step]
+
+
+class Item(TypedDict):
+    id: str
+    name: str
+    summary: str
+    description: str | None
+    archived: bool
+    timezone: str
+    schedule: dict[str, int]
+    occurrence: Occurrence
+    last_completion: Completion | None
+
+
+class History(TypedDict):
+    items: list[Completion]
+    next_page: str | None
+
+
+scratch = Path(sys.argv[1])
+mode, occurrence, next_occurrence, first_id, second_id = sys.argv[2:]
+if mode == "history":
+    history: History = json.loads((scratch / "response.json").read_text())
+    expected: Completion = json.loads((scratch / "completion.json").read_text())
+    assert history["items"] == [expected], "Completion history changed"
+    assert history["next_page"] is None
+    sys.exit(0)
+
+item: Item = json.loads((scratch / "response.json").read_text())
+assert item["id"] == "example-filter"
+assert item["name"] == "Example filter"
+assert item["summary"] == "Replace the example filter"
+assert item["description"] == "Example task with a partial checklist."
+assert item["timezone"] == "Etc/UTC" and item["archived"] is False
+assert item["schedule"] == {"days": 47, "months": 0, "years": 0}
+assert str(UUID(item["occurrence"]["id"])) == item["occurrence"]["id"]
+steps = item["occurrence"]["checklist"]
+assert [(step["id"], step["summary"]) for step in steps] == [
+    (first_id, "Inspect the example filter"),
+    (second_id, "Fit the example replacement"),
+]
+for step in steps:
+    checked = step["completion"]
+    if checked is not None:
+        timestamp = datetime.fromisoformat(checked["completed_at"].replace("Z", "+00:00"))
+        assert timestamp.utcoffset() == timedelta(0)
+
+if mode in {"fresh", "partial"}:
+    assert item["occurrence"]["id"] == occurrence
+    assert item["occurrence"]["due"] == "2031-02-17"
+    assert item["last_completion"] is None
+    assert steps[1]["completion"] is None
+    if mode == "fresh":
+        assert steps[0]["completion"] is None
+    else:
+        checked = steps[0]["completion"]
+        assert checked is not None
+        assert checked["actor"] == {
+            "kind": "user", "id": "ha:example-user", "name": "Example user"
+        }
+else:
+    assert item["occurrence"]["id"] == next_occurrence != occurrence
+    completed = item["last_completion"]
+    assert completed is not None and completed["occurrence_id"] == occurrence
+    completed_at = datetime.fromisoformat(completed["completed_at"].replace("Z", "+00:00"))
+    assert completed["previous_due"] == "2031-02-17"
+    assert item["occurrence"]["due"] == completed["next_due"]
+    assert completed["next_due"] == (completed_at.date() + timedelta(days=47)).isoformat()
+    partial: list[Step] = json.loads((scratch / "partial-checklist.json").read_text())
+    assert completed["checklist"] == partial, "Partial checklist snapshot changed"
+    if mode == "reset":
+        assert all(step["completion"] is None for step in steps)
+    else:
+        assert mode == "persisted"
+        current: list[Step] = json.loads((scratch / "current-checklist.json").read_text())
+        assert steps == current, "Current checklist did not survive restart or restore"
+        assert steps[0]["completion"] is None
+        checked = steps[1]["completion"]
+        assert checked is not None and checked["actor"]["kind"] == "system"
+        assert checked["actor"]["id"] == "owner"
+PY
+}
+
 check_item() {
     request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
-    jq --exit-status --arg occurrence "$next_occurrence" \
-        '.id == "example-filter" and .name == "Example filter" and
-         .occurrence.id == $occurrence and .archived == false and
-         .schedule.days == 47 and .timezone == "Etc/UTC"' \
-        "$scratch/response.json" >/dev/null
+    check_item_contract persisted
     request GET /v1/items/example-filter/events 200 --header "Authorization: Bearer $token"
-    jq --exit-status '(.items | length) == 1' "$scratch/response.json" >/dev/null
+    check_item_contract history
 }
 
 check_credentials() {
@@ -139,8 +259,30 @@ request POST /v1/items 201 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: smoke-create-filter' \
-    --data '{"id":"example-filter","name":"Example filter","timezone":"Etc/UTC","due":"2031-02-17","schedule":{"days":47,"months":0,"years":0}}'
+    --data "{\"id\":\"example-filter\",\"name\":\"Example filter\",\"summary\":\"Replace the example filter\",\"description\":\"Example task with a partial checklist.\",\"timezone\":\"Etc/UTC\",\"due\":\"2031-02-17\",\"schedule\":{\"days\":47,\"months\":0,\"years\":0},\"checklist\":[{\"id\":\"$step_id\",\"summary\":\"Inspect the example filter\"},{\"id\":\"$other_step_id\",\"summary\":\"Fit the example replacement\"}]}"
 occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
+check_item_contract fresh
+step_revision=$(etag)
+step_body=$(jq --compact-output --null-input --arg occurrence "$occurrence" '{occurrence_id:$occurrence,completed:true}')
+# An ordinary authenticated Home Assistant user can check a step without
+# gaining administrator access or advancing the occurrence.
+request PUT "/v1/items/example-filter/checklist/$step_id" 200 \
+    --header "Authorization: Bearer $integration_token" \
+    --header 'X-Maintenance-Actor-Id: ha:example-user' \
+    --header 'X-Maintenance-Actor-Name: Example user' \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-check-filter' \
+    --header "If-Match: $step_revision" --data "$step_body"
+check_item_contract partial
+jq '.occurrence.checklist' "$scratch/response.json" > "$scratch/partial-checklist.json"
+request PUT "/v1/items/example-filter/checklist/$step_id" 200 \
+    --header "Authorization: Bearer $integration_token" \
+    --header 'X-Maintenance-Actor-Id: ha:example-user' \
+    --header 'X-Maintenance-Actor-Name: Example user' \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-check-filter' \
+    --header "If-Match: $step_revision" --data "$step_body"
+check_item_contract partial
 request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
 revision=$(etag)
 test -n "$revision"
@@ -152,6 +294,8 @@ request POST /v1/items/example-filter/completions 200 \
     --header "If-Match: $revision" --data "$body"
 next_occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
 test "$occurrence" != "$next_occurrence"
+check_item_contract reset
+jq '.last_completion' "$scratch/response.json" > "$scratch/completion.json"
 # Retry the accepted request with its original revision and occurrence. Durable
 # idempotency must return that response without completing the next occurrence.
 request POST /v1/items/example-filter/completions 200 \
@@ -160,6 +304,25 @@ request POST /v1/items/example-filter/completions 200 \
     --header 'Idempotency-Key: smoke-complete-filter' \
     --header "If-Match: $revision" --data "$body"
 jq --exit-status --arg id "$next_occurrence" '.occurrence.id == $id' "$scratch/response.json" >/dev/null
+stale_revision=$(etag)
+# A new key cannot apply a step change to the occurrence that just completed.
+request PUT "/v1/items/example-filter/checklist/$step_id" 409 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-stale-step' \
+    --header "If-Match: $stale_revision" --data "$step_body"
+
+# Keep a check on the successor to verify in-progress state independently of
+# the immutable completed snapshot through both restarts and cold restore.
+request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
+current_step_revision=$(etag)
+current_step_body=$(jq --compact-output --null-input --arg occurrence "$next_occurrence" '{occurrence_id:$occurrence,completed:true}')
+request PUT "/v1/items/example-filter/checklist/$other_step_id" 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-check-successor' \
+    --header "If-Match: $current_step_revision" --data "$current_step_body"
+jq '.occurrence.checklist' "$scratch/response.json" > "$scratch/current-checklist.json"
 check_item
 
 # Supervisor supplies root-owned options. Restart through that path to exercise
@@ -223,6 +386,24 @@ request POST /v1/items/example-filter/completions 200 \
     --header 'Idempotency-Key: smoke-complete-filter' \
     --header "If-Match: $revision" --data "$body"
 check_item
+request PUT "/v1/items/example-filter/checklist/$other_step_id" 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-check-successor' \
+    --header "If-Match: $current_step_revision" --data "$current_step_body"
+check_item_contract persisted
+check_item
+request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
+undo_revision=$(etag)
+undo_body=$(jq --compact-output --null-input --arg occurrence "$next_occurrence" '{occurrence_id:$occurrence,completed:false}')
+request PUT "/v1/items/example-filter/checklist/$other_step_id" 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-uncheck-successor' \
+    --header "If-Match: $undo_revision" --data "$undo_body"
+check_item_contract reset
+request GET /v1/items/example-filter/events 200 --header "Authorization: Bearer $token"
+check_item_contract history
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, atomic completion/retry, restart, and cold backup/restore."
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, partial checklists/history/reset, durable retries, restart, and cold backup/restore."

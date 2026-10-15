@@ -111,12 +111,35 @@
         }
       }
     },
+    "checklistStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "summary"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "\\S",
+          "description": "Nonblank step text. The service also enforces a 200-byte UTF-8 limit."
+        }
+      }
+    },
     "item": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "id",
         "name",
+        "summary",
         "timezone",
         "due",
         "schedule"
@@ -131,6 +154,23 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 200
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "\\S",
+          "description": "Action title shown for each occurrence, distinct from the item's name. The service also enforces a 200-byte UTF-8 limit."
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 16000,
+          "pattern": "\\S",
+          "description": "Optional task details; a supplied string must contain non-whitespace text. The service also enforces a 16000-byte UTF-8 limit."
         },
         "timezone": {
           "type": "string",
@@ -175,6 +215,16 @@
             "maxLength": 2000
           },
           "maxItems": 100
+        },
+        "checklist": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/checklistStep"
+          },
+          "maxItems": 100,
+          "uniqueItems": true,
+          "default": [],
+          "description": "Checklist template. Step IDs must be unique within an item; the service enforces ID uniqueness. Each occurrence receives its own completion state."
         },
         "specs": {
           "type": "array",

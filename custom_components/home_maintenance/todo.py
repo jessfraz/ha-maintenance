@@ -77,10 +77,10 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
         return [
             TodoItem(
                 uid=str(item.occurrence_id),
-                summary=item.name,
+                summary=item.summary,
                 status=TodoItemStatus.NEEDS_ACTION,
                 due=item.due,
-                description="\n".join(item.instructions) or None,
+                description=item.todo_description,
             )
             for item in self.coordinator.data.items
             if not item.archived
@@ -105,11 +105,11 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             )
         if (
             item.status != TodoItemStatus.COMPLETED
-            or (item.summary is not None and item.summary != current.name)
+            or (item.summary is not None and item.summary != current.summary)
             or (item.due is not None and item.due != current.due)
             or (
                 item.description is not None
-                and item.description != ("\n".join(current.instructions) or None)
+                and item.description != current.todo_description
             )
         ):
             raise ServiceValidationError(

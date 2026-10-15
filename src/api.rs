@@ -14,12 +14,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use uuid::Uuid;
 
 use crate::{
     installation::{Installation, InstallationReport, PresenceReport},
     models::{
-        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Page, Summary,
-        SystemActor, UpdateItem,
+        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Page,
+        SetChecklistStep, Summary, SystemActor, UpdateItem,
     },
     store::Store,
 };
@@ -265,6 +266,11 @@ struct ItemPath {
     id: ItemId,
 }
 #[derive(Deserialize, JsonSchema)]
+struct ChecklistPath {
+    id: ItemId,
+    step_id: Uuid,
+}
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListQuery {
     #[serde(default)]
@@ -376,6 +382,30 @@ async fn item_complete(
             .store
             .complete(
                 &path.into_inner().id,
+                revision(&request)?,
+                body.into_inner(),
+                &principal.actor,
+                idempotency(&request)?,
+            )
+            .await?,
+    ))
+}
+/// Check one step of the current occurrence without advancing its schedule.
+#[endpoint {method=PUT,path="/v1/items/{id}/checklist/{step_id}",tags=["items"]}]
+async fn checklist_step_set(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ChecklistPath>,
+    body: TypedBody<SetChecklistStep>,
+) -> Result<ItemResponse, HttpError> {
+    let principal = authenticate(&request)?;
+    let path = path.into_inner();
+    Ok(item_response(
+        request
+            .context()
+            .store
+            .set_checklist_step(
+                &path.id,
+                path.step_id,
                 revision(&request)?,
                 body.into_inner(),
                 &principal.actor,
@@ -580,13 +610,14 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 20] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 21] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
         item_get.into(),
         item_update.into(),
         item_complete.into(),
+        checklist_step_set.into(),
         item_archive.into(),
         item_restore.into(),
         item_events.into(),
@@ -608,7 +639,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     Ok(api)
 }
 pub fn openapi() -> Result<serde_json::Value> {
-    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates and completions require Idempotency-Key; item mutations require the current quoted If-Match revision.").json().map_err(Into::into)
+    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates, completions and checklist changes require Idempotency-Key; item mutations require the current quoted If-Match revision.").json().map_err(Into::into)
 }
 pub fn start(bind: SocketAddr, context: Arc<Context>) -> Result<HttpServer<Arc<Context>>> {
     start_with_logger(bind, context, crate::logging::logger())

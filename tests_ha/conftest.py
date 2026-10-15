@@ -20,15 +20,28 @@ SUMMARY = {"active": 4, "overdue": 1, "due_soon": 2, "completed": 3}
 ITEM_ID = "replace-filter"
 OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e"
 NEXT_OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617f"
+STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6180"
+SECOND_STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6181"
 
 
 def item_record(
-    *, item_id: str = ITEM_ID, occurrence_id: str = OCCURRENCE_ID, revision: int = 1
+    *,
+    item_id: str = ITEM_ID,
+    occurrence_id: str = OCCURRENCE_ID,
+    revision: int = 1,
+    summary: str = "Replace filter",
+    description: str | None = None,
+    checklist: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """A synthetic public-contract task unrelated to any household data."""
     return {
         "id": item_id,
         "name": "Replace filter",
+        "summary": summary,
+        "description": description,
+        "checklist": [
+            {"id": step["id"], "summary": step["summary"]} for step in checklist or []
+        ],
         "timezone": "UTC",
         "location": None,
         "group": None,
@@ -39,7 +52,11 @@ def item_record(
         "reorder_url": None,
         "revision": revision,
         "archived": False,
-        "occurrence": {"id": occurrence_id, "due": "2026-10-15"},
+        "occurrence": {
+            "id": occurrence_id,
+            "due": "2026-10-15",
+            "checklist": checklist or [],
+        },
         "last_completion": None,
     }
 
