@@ -1,0 +1,1074 @@
+"use strict";
+
+const byId = (id) => document.getElementById(id);
+const base = new URL(document.baseURI);
+const isEmbedded = window.parent !== window;
+const isIngress = base.pathname.includes("/api/hassio_ingress/");
+let token = "";
+let connected = false;
+let isOwner = false;
+let items = [];
+let selected = null;
+let editing = null;
+let listGeneration = 0;
+let detailGeneration = 0;
+let eventsPage = null;
+let historyBusyGeneration = null;
+let historyRequest = 0;
+let editorBusy = false;
+let editorIdTouched = false;
+let createRequest = null;
+let loadedArchive = false;
+let parentPrefix = null;
+let metadataRowId = 0;
+const completionRequests = new Map();
+const completionBusy = new Set();
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+
+function notice(message, error = false) {
+  byId("notice").textContent = message;
+  byId("notice").className = error ? "error" : "";
+}
+
+function errorMessage(error) {
+  if (error instanceof ApiError && error.status === 401)
+    return connected
+      ? "Your connection needs a valid token. Reload this tab to connect again."
+      : "The token was not accepted. Check it and try again.";
+  return error instanceof Error
+    ? error.message
+    : "The request could not be completed.";
+}
+
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers);
+  headers.set("X-Maintenance-Request", "1");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (options.body !== undefined)
+    headers.set("Content-Type", "application/json");
+  let response;
+  try {
+    response = await fetch(new URL(path, base), {
+      ...options,
+      headers,
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error(
+      "The service could not be reached. Check your connection and try again.",
+    );
+  }
+  if (response.status === 204) return null;
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ApiError(
+      "The service returned an unreadable response. Refresh to check its current state.",
+      response.status,
+    );
+  }
+  if (!response.ok)
+    throw new ApiError(
+      body.message || `Request failed (${response.status}).`,
+      response.status,
+    );
+  return body;
+}
+
+function guarded(action, errorTarget = null) {
+  return async (event) => {
+    event?.preventDefault();
+    try {
+      await action(event);
+    } catch (error) {
+      if (errorTarget) byId(errorTarget).textContent = errorMessage(error);
+      else notice(errorMessage(error), true);
+    }
+  };
+}
+
+function today(timeZone) {
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const part = (type) => parts.find((value) => value.type === type).value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function dateLabel(value) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value}T12:00:00Z`));
+}
+
+function timestampLabel(value) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function dueInfo(item) {
+  const due = item.occurrence.due;
+  const days = Math.round(
+    (Date.parse(`${due}T12:00:00Z`) -
+      Date.parse(`${today(item.timezone)}T12:00:00Z`)) /
+      86400000,
+  );
+  if (days < 0)
+    return {
+      label: `${-days} day${days === -1 ? "" : "s"} overdue`,
+      className: "overdue",
+      days,
+    };
+  if (days === 0) return { label: "Due today", className: "", days };
+  if (days === 1) return { label: "Due tomorrow", className: "", days };
+  return { label: `Due in ${days} days`, className: "", days };
+}
+
+function cadence(schedule) {
+  return ["years", "months", "days"]
+    .filter((unit) => schedule[unit] > 0)
+    .map(
+      (unit) =>
+        `${schedule[unit]} ${schedule[unit] === 1 ? unit.slice(0, -1) : unit}`,
+    )
+    .join(", ");
+}
+
+function itemPath(id) {
+  return `items/${encodeURIComponent(id)}`;
+}
+
+function routeId() {
+  const relative = location.pathname.startsWith(base.pathname)
+    ? location.pathname.slice(base.pathname.length)
+    : "";
+  const match = /^items\/([a-z0-9]+(?:-[a-z0-9]+)*)\/?$/.exec(relative);
+  return match ? match[1] : null;
+}
+
+function navigate(id, replace = false) {
+  const path = id ? itemPath(id) : "";
+  const url = new URL(path, base);
+  if (location.pathname !== url.pathname)
+    history[replace ? "replaceState" : "pushState"](null, "", url.pathname);
+  if (parentPrefix)
+    window.parent.postMessage(
+      {
+        type: "home-assistant/navigate",
+        path: parentPrefix + (path ? `/${path}` : "/"),
+        options: { replace },
+      },
+      location.origin,
+    );
+}
+
+function safeLink(url, label) {
+  try {
+    const parsed = new URL(url);
+    if (
+      !["https:", "http:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password
+    )
+      return null;
+    const link = element("a", `${label} ↗`);
+    link.href = parsed.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    return link;
+  } catch {
+    return null;
+  }
+}
+
+function renderSummary(summary) {
+  const root = byId("summary");
+  root.replaceChildren();
+  for (const [key, label] of [
+    ["active", "Active items"],
+    ["overdue", "Overdue"],
+    ["due_soon", "Due in 14 days"],
+    ["completed", "Completions recorded"],
+  ]) {
+    const stat = element(
+      "div",
+      undefined,
+      `summary-stat${key === "overdue" && summary[key] > 0 ? " attention" : ""}`,
+    );
+    stat.append(
+      element("strong", new Intl.NumberFormat().format(summary[key])),
+      element("span", label),
+    );
+    root.append(stat);
+  }
+}
+
+function renderList() {
+  const query = byId("query").value.trim().toLocaleLowerCase();
+  const view = byId("view").value;
+  const visible = items
+    .filter((item) => {
+      const matches = [item.name, item.location, item.group]
+        .filter(Boolean)
+        .some((value) => value.toLocaleLowerCase().includes(query));
+      const days = dueInfo(item).days;
+      return (
+        matches &&
+        (view !== "overdue" || days < 0) &&
+        (view !== "due_soon" || (days >= 0 && days <= 14))
+      );
+    })
+    .sort(
+      (left, right) =>
+        left.occurrence.due.localeCompare(right.occurrence.due) ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
+  const root = byId("list");
+  root.replaceChildren();
+  byId("queue-title").textContent =
+    view === "archived" ? "Archived maintenance" : "Your maintenance queue";
+  byId("list-status").textContent =
+    `${visible.length} ${visible.length === 1 ? "item" : "items"}${query ? ` matching “${byId("query").value.trim()}”` : ""} · earliest due first`;
+  if (!visible.length) {
+    const empty = element("div", undefined, "empty-state");
+    const title = query
+      ? "No matching items"
+      : view === "overdue"
+        ? "Nothing overdue"
+        : view === "due_soon"
+          ? "Nothing due in the next two weeks"
+          : view === "archived"
+            ? "No archived items"
+            : "A fresh start";
+    const copy = query
+      ? "Try a different name, location, or group."
+      : view === "active"
+        ? isOwner
+          ? "Add your first maintenance item to build a queue that keeps itself in order."
+          : "Maintenance items will appear here when they are added."
+        : "Choose another view to see the rest of your maintenance.";
+    empty.append(element("h2", title), element("p", copy));
+    root.append(empty);
+  }
+  for (const item of visible) {
+    const card = element(
+      "article",
+      undefined,
+      `item-card${item.archived ? " archived" : ""}`,
+    );
+    const content = element("div");
+    content.append(
+      element(
+        "p",
+        [item.location, item.group].filter(Boolean).join(" / ") ||
+          "MAINTENANCE",
+        "eyebrow",
+      ),
+    );
+    const link = element("a", item.name);
+    link.href = new URL(itemPath(item.id), base).href;
+    link.addEventListener("click", (event) => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+      event.preventDefault();
+      openDetail(item.id).catch((error) => notice(errorMessage(error), true));
+    });
+    content.append(
+      link,
+      element("div", `Every ${cadence(item.schedule)}`, "item-meta"),
+    );
+    const due = element("div", undefined, "item-due");
+    const info = dueInfo(item);
+    due.append(
+      element(
+        "span",
+        item.archived ? "Archived" : info.label,
+        `badge ${item.archived ? "archived" : info.className}`,
+      ),
+    );
+    const time = element("time", dateLabel(item.occurrence.due));
+    time.dateTime = item.occurrence.due;
+    due.append(time);
+    card.append(content, due);
+    root.append(card);
+  }
+}
+
+async function load() {
+  const generation = ++listGeneration;
+  const archived = byId("view").value === "archived";
+  byId("refresh").disabled = true;
+  byId("list").setAttribute("aria-busy", "true");
+  byId("list-status").textContent = "Loading maintenance…";
+  try {
+    const loadItems = async () => {
+      const result = [];
+      const cursors = new Set();
+      let cursor = null;
+      do {
+        const params = new URLSearchParams({
+          limit: "200",
+          archived: String(archived),
+        });
+        if (cursor) params.set("page_token", cursor);
+        const page = await api(`v1/items?${params}`);
+        if (generation !== listGeneration) return null;
+        result.push(...page.items);
+        cursor = page.next_page;
+        if (cursor && cursors.has(cursor))
+          throw new Error(
+            "The service repeated a list page. Refresh to try again.",
+          );
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
+      return result;
+    };
+    const [loaded, summary] = await Promise.all([
+      loadItems(),
+      api("v1/summary"),
+    ]);
+    if (generation !== listGeneration || !loaded) return;
+    items = loaded;
+    loadedArchive = archived;
+    renderSummary(summary);
+    renderList();
+  } catch (error) {
+    if (generation === listGeneration) {
+      byId("list-status").textContent =
+        "Maintenance could not be refreshed. The last loaded items may be out of date.";
+      throw error;
+    }
+  } finally {
+    if (generation === listGeneration) {
+      byId("refresh").disabled = false;
+      byId("list").setAttribute("aria-busy", "false");
+    }
+  }
+}
+
+function section(title) {
+  const node = element("section", undefined, "detail-section");
+  node.append(element("h3", title));
+  return node;
+}
+
+function action(label, handler, className = "quiet") {
+  const button = element("button", label, className);
+  button.type = "button";
+  button.addEventListener(
+    "click",
+    guarded(async () => {
+      button.disabled = true;
+      try {
+        await handler();
+      } finally {
+        button.disabled = false;
+      }
+    }, "detail-error"),
+  );
+  return button;
+}
+
+function renderDetail() {
+  const item = selected;
+  if (!item) return;
+  byId("detail-title").textContent = item.name;
+  byId("detail-location").textContent =
+    [item.location, item.group].filter(Boolean).join(" / ") || "MAINTENANCE";
+  const root = byId("detail-content");
+  root.replaceChildren();
+  const timing = element("div", undefined, "timing");
+  const due = element("div");
+  due.append(
+    element("span", item.archived ? "ARCHIVED" : "NEXT DUE"),
+    element("strong", item.archived ? "Schedule paused" : dueInfo(item).label),
+    element("p", `${dateLabel(item.occurrence.due)} · ${item.timezone}`),
+  );
+  const interval = element("div");
+  interval.append(
+    element("span", "REPEAT AFTER COMPLETION"),
+    element("strong", cadence(item.schedule)),
+    element("p", "Calendar cadence"),
+  );
+  timing.append(due, interval);
+  root.append(timing);
+  if (item.instructions.length) {
+    const instructions = section("Instructions");
+    const list = element("ol", undefined, "instructions");
+    for (const instruction of item.instructions)
+      list.append(element("li", instruction));
+    instructions.append(list);
+    root.append(instructions);
+  }
+  if (item.specs.length) {
+    const specs = section("Specifications");
+    const list = element("dl", undefined, "specs");
+    for (const spec of item.specs) {
+      const row = element("div");
+      row.append(element("dt", spec.label), element("dd", spec.value));
+      list.append(row);
+    }
+    specs.append(list);
+    root.append(specs);
+  }
+  if (item.resources.length || item.reorder_url) {
+    const references = section("References");
+    const links = element("div", undefined, "resources");
+    for (const resource of item.resources) {
+      const link = safeLink(resource.url, resource.label);
+      if (link) links.append(link);
+    }
+    if (item.reorder_url) {
+      const link = safeLink(item.reorder_url, "Reorder");
+      if (link) links.append(link);
+    }
+    references.append(links);
+    root.append(references);
+  }
+  const actions = byId("actions");
+  actions.replaceChildren();
+  if (!item.archived) {
+    const complete = action(
+      completionRequests.has(item.id)
+        ? "Retry completion"
+        : "Mark maintenance done",
+      () => completeItem(item),
+      "",
+    );
+    complete.disabled = completionBusy.has(item.id);
+    actions.append(complete);
+  }
+  actions.append(action("Copy NFC link", () => copyItemLink(item)));
+  if (isOwner) {
+    actions.append(action("Edit", () => openEditor(item)));
+    actions.append(
+      action(
+        item.archived ? "Restore item" : "Archive",
+        () => archiveItem(item),
+        "quiet archive-action",
+      ),
+    );
+  }
+}
+
+async function copyItemLink(item) {
+  if ((isEmbedded || isIngress) && !parentPrefix)
+    throw new Error(
+      "Open this item from the Home Assistant sidebar before copying its permanent NFC link.",
+    );
+  const url = parentPrefix
+    ? new URL(`${parentPrefix}/${itemPath(item.id)}`, location.origin)
+    : new URL(itemPath(item.id), base);
+  try {
+    await navigator.clipboard.writeText(url.href);
+  } catch {
+    throw new Error(
+      "Clipboard access is unavailable. Open this item’s link in a browser and copy its address.",
+    );
+  }
+  notice(
+    "Item link copied. It contains no API token and can be written to an NFC tag.",
+  );
+  byId("detail-status").textContent =
+    "NFC link copied. It contains no API token.";
+}
+
+async function openDetail(id, updateRoute = true) {
+  const generation = ++detailGeneration;
+  byId("detail-error").textContent = "";
+  byId("detail-status").textContent = "";
+  const item = await api(`v1/items/${encodeURIComponent(id)}`);
+  if (generation !== detailGeneration) return;
+  selected = item;
+  eventsPage = null;
+  byId("events").replaceChildren();
+  byId("more-events").hidden = true;
+  byId("events-status").textContent = "Loading history…";
+  renderDetail();
+  if (!byId("detail").open) byId("detail").showModal();
+  if (updateRoute) navigate(id);
+  await loadEvents(generation);
+}
+
+function closeDetail(updateRoute = true) {
+  ++detailGeneration;
+  selected = null;
+  byId("detail").close();
+  if (updateRoute) navigate(null);
+}
+
+async function loadEvents(generation = detailGeneration) {
+  if (!selected || historyBusyGeneration === generation) return;
+  const id = selected.id;
+  const params = new URLSearchParams({ limit: "50" });
+  if (eventsPage) params.set("page_token", eventsPage);
+  historyBusyGeneration = generation;
+  const request = ++historyRequest;
+  byId("more-events").disabled = true;
+  try {
+    const page = await api(
+      `v1/items/${encodeURIComponent(id)}/events?${params}`,
+    );
+    if (generation !== detailGeneration || selected?.id !== id) return;
+    for (const event of page.items) {
+      const row = element("li");
+      const actor =
+        event.actor.kind === "system"
+          ? `${event.actor.name} (system)`
+          : event.actor.name;
+      row.append(element("strong", `Completed by ${actor}`));
+      const time = element("time", timestampLabel(event.completed_at));
+      time.dateTime = event.completed_at;
+      row.append(
+        time,
+        element(
+          "p",
+          `Previously due ${dateLabel(event.previous_due)} · next due ${dateLabel(event.next_due)}`,
+        ),
+      );
+      byId("events").append(row);
+    }
+    eventsPage = page.next_page;
+    byId("more-events").hidden = !eventsPage;
+    byId("more-events").textContent = "Load more history";
+    byId("events-status").textContent = byId("events").children.length
+      ? ""
+      : "No completions recorded yet.";
+  } catch (error) {
+    if (generation === detailGeneration) {
+      byId("events-status").textContent =
+        `History unavailable. ${errorMessage(error)}`;
+      byId("more-events").hidden = false;
+      byId("more-events").textContent = "Retry history";
+    }
+  } finally {
+    if (request === historyRequest) {
+      historyBusyGeneration = null;
+      byId("more-events").disabled = false;
+    }
+  }
+}
+
+async function completeItem(item) {
+  if (completionBusy.has(item.id)) return;
+  let request = completionRequests.get(item.id);
+  if (
+    request &&
+    (request.occurrenceId !== item.occurrence.id ||
+      request.revision !== item.revision)
+  ) {
+    completionRequests.delete(item.id);
+    byId("detail-error").textContent =
+      "This item changed. Review its current due date before completing it again.";
+    renderDetail();
+    return;
+  }
+  if (!request) {
+    request = {
+      key: crypto.randomUUID(),
+      occurrenceId: item.occurrence.id,
+      revision: item.revision,
+    };
+    completionRequests.set(item.id, request);
+  }
+  completionBusy.add(item.id);
+  byId("detail-error").textContent = "";
+  renderDetail();
+  let updated;
+  try {
+    updated = await api(`v1/items/${encodeURIComponent(item.id)}/completions`, {
+      method: "POST",
+      headers: {
+        "If-Match": `"${request.revision}"`,
+        "Idempotency-Key": request.key,
+      },
+      body: JSON.stringify({ occurrence_id: request.occurrenceId }),
+    });
+  } catch (error) {
+    if (error instanceof ApiError && [409, 412].includes(error.status)) {
+      completionRequests.delete(item.id);
+      if (selected?.id === item.id) await openDetail(item.id, false);
+      byId("detail-error").textContent =
+        "This item changed or its occurrence was already completed. The latest version is shown. Review it before completing again.";
+    } else {
+      byId("detail-error").textContent =
+        `${errorMessage(error)} If the completion response was lost, Retry completion safely checks the same occurrence.`;
+    }
+    return;
+  } finally {
+    completionBusy.delete(item.id);
+    if (selected?.id === item.id) renderDetail();
+  }
+  completionRequests.delete(item.id);
+  if (selected?.id === item.id) {
+    ++detailGeneration;
+    selected = updated;
+    renderDetail();
+    eventsPage = null;
+    byId("events").replaceChildren();
+    await loadEvents();
+  }
+  notice(
+    `Maintenance recorded. ${updated.name} is next due ${dateLabel(updated.occurrence.due)}.`,
+  );
+  if (selected?.id === item.id)
+    byId("detail-status").textContent =
+      `Maintenance recorded. Next due ${dateLabel(updated.occurrence.due)}.`;
+  await load().catch((error) =>
+    notice(
+      `Maintenance was recorded, but the queue could not be refreshed. ${errorMessage(error)}`,
+      true,
+    ),
+  );
+}
+
+async function archiveItem(item) {
+  let updated;
+  try {
+    updated = await api(`v1/items/${encodeURIComponent(item.id)}/archive`, {
+      method: item.archived ? "DELETE" : "PUT",
+      headers: { "If-Match": `"${item.revision}"` },
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 412) {
+      if (selected?.id === item.id) await openDetail(item.id, false);
+      byId("detail-error").textContent =
+        "This item changed. Review the latest version before changing its archive state.";
+    } else
+      byId("detail-error").textContent =
+        `${errorMessage(error)} Refresh the item before retrying to check its current archive state.`;
+    return;
+  }
+  if (selected?.id === item.id) {
+    selected =
+      updated || (await api(`v1/items/${encodeURIComponent(item.id)}`));
+    renderDetail();
+  }
+  notice(
+    item.archived
+      ? "Item restored to the maintenance queue."
+      : "Item archived. Its history and NFC link are preserved.",
+  );
+  if (selected?.id === item.id)
+    byId("detail-status").textContent = item.archived
+      ? "Restored to the maintenance queue."
+      : "Archived. Completion history and the NFC link are preserved.";
+  await load().catch((error) =>
+    notice(
+      `The item was ${item.archived ? "restored" : "archived"}, but the queue could not be refreshed. ${errorMessage(error)}`,
+      true,
+    ),
+  );
+}
+
+function addMetadataRow(kind, label = "", value = "") {
+  const row = element("div", undefined, "metadata-row");
+  const rowId = ++metadataRowId;
+  for (const [key, title, initial] of [
+    ["label", "Label", label],
+    ["value", kind === "resource" ? "URL" : "Value", value],
+  ]) {
+    const field = element("label", title);
+    const input = element("input");
+    input.id = `metadata-${rowId}-${key}`;
+    input.name = `${kind}_${key}`;
+    input.value = initial;
+    input.required = true;
+    input.maxLength = key === "label" ? 100 : kind === "resource" ? 2048 : 500;
+    input.type = kind === "resource" && key === "value" ? "url" : "text";
+    if (input.type === "url") input.placeholder = "https://";
+    field.htmlFor = input.id;
+    field.append(input);
+    row.append(field);
+  }
+  const remove = element("button", "×", "quiet");
+  remove.type = "button";
+  remove.setAttribute(
+    "aria-label",
+    `Remove ${kind === "resource" ? "reference link" : "specification"}`,
+  );
+  remove.addEventListener("click", () => {
+    row.remove();
+    byId(kind === "resource" ? "add-resource" : "add-spec").focus();
+  });
+  row.append(remove);
+  byId(kind === "resource" ? "resource-rows" : "spec-rows").append(row);
+  return row;
+}
+
+function openEditor(item = null) {
+  if (!isOwner) return;
+  editing = item;
+  createRequest = null;
+  editorIdTouched = Boolean(item);
+  const form = byId("edit-form");
+  form.reset();
+  byId("edit-title").textContent = item
+    ? "Edit maintenance item"
+    : "Add maintenance item";
+  byId("save").textContent = item ? "Save changes" : "Add item";
+  byId("save").disabled = false;
+  byId("edit-error").textContent = "";
+  byId("reload-edit").hidden = true;
+  byId("spec-rows").replaceChildren();
+  byId("resource-rows").replaceChildren();
+  for (const name of [
+    "name",
+    "id",
+    "location",
+    "group",
+    "timezone",
+    "reorder_url",
+  ])
+    form.elements.namedItem(name).value = item?.[name] || "";
+  const timezone =
+    item?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  form.elements.namedItem("timezone").value = timezone;
+  form.elements.namedItem("due").value =
+    item?.occurrence.due || today(timezone);
+  form.elements.namedItem("instructions").value =
+    item?.instructions.join("\n") || "";
+  form.elements.namedItem("id").disabled = Boolean(item);
+  for (const unit of ["years", "months", "days"])
+    form.elements.namedItem(unit).value =
+      item?.schedule[unit] ?? (unit === "days" ? 30 : 0);
+  byId("days").setCustomValidity("");
+  for (const spec of item?.specs || [])
+    addMetadataRow("spec", spec.label, spec.value);
+  for (const resource of item?.resources || [])
+    addMetadataRow("resource", resource.label, resource.url);
+  if (!byId("editor").open) byId("editor").showModal();
+  byId("name").focus();
+}
+
+function metadataValues(kind) {
+  const root = byId(kind === "resource" ? "resource-rows" : "spec-rows");
+  return [...root.children].map((row) => {
+    const label = row.querySelector(`[name="${kind}_label"]`).value.trim();
+    const value = row.querySelector(`[name="${kind}_value"]`).value.trim();
+    if (kind === "resource") {
+      if (!safeLink(value, label))
+        throw new Error("Reference links must start with https:// or http://.");
+      return { label, url: value };
+    }
+    return { label, value };
+  });
+}
+
+async function saveItem() {
+  if (editorBusy) return;
+  const form = byId("edit-form");
+  const value = (name) => form.elements.namedItem(name).value.trim();
+  const schedule = {
+    days: Number(value("days")),
+    months: Number(value("months")),
+    years: Number(value("years")),
+  };
+  byId("days").setCustomValidity(
+    Object.values(schedule).some((days) => days > 0)
+      ? ""
+      : "Choose a repeat interval of at least one day, month, or year.",
+  );
+  if (!form.reportValidity()) return;
+  try {
+    today(value("timezone"));
+  } catch {
+    byId("edit-error").textContent =
+      "Enter a valid time zone, such as UTC or the zone reported by your system.";
+    return;
+  }
+  const body = {
+    name: value("name"),
+    location: value("location") || null,
+    group: value("group") || null,
+    timezone: value("timezone"),
+    due: value("due"),
+    schedule,
+    instructions: value("instructions")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean),
+    specs: metadataValues("spec"),
+    resources: metadataValues("resource"),
+    reorder_url: value("reorder_url") || null,
+  };
+  if (body.reorder_url && !safeLink(body.reorder_url, "Reorder")) {
+    byId("edit-error").textContent =
+      "The reorder link must start with https:// or http://.";
+    return;
+  }
+  if (!editing) body.id = value("id");
+  const current = editing;
+  const payload = JSON.stringify(body);
+  if (!current && createRequest?.payload !== payload)
+    createRequest = { payload, key: crypto.randomUUID() };
+  editorBusy = true;
+  byId("item-fields").disabled = true;
+  byId("save").disabled = true;
+  byId("close-editor").disabled = true;
+  byId("edit-error").textContent = "";
+  let updated;
+  try {
+    updated = await api(
+      current ? `v1/items/${encodeURIComponent(current.id)}` : "v1/items",
+      {
+        method: current ? "PATCH" : "POST",
+        headers: current
+          ? { "If-Match": `"${current.revision}"` }
+          : { "Idempotency-Key": createRequest.key },
+        body: payload,
+      },
+    );
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 412) {
+      byId("edit-error").textContent =
+        "This item changed. Your draft is still here. Load the latest version to review its changes before editing again; this replaces your draft.";
+      byId("reload-edit").hidden = false;
+      byId("save").disabled = true;
+    } else byId("edit-error").textContent = errorMessage(error);
+    return;
+  } finally {
+    editorBusy = false;
+    byId("item-fields").disabled = false;
+    byId("save").disabled = !byId("reload-edit").hidden;
+    byId("close-editor").disabled = false;
+  }
+  byId("editor").close();
+  editing = null;
+  createRequest = null;
+  notice(current ? "Maintenance item updated." : "Maintenance item added.");
+  const refreshes = await Promise.allSettled([load(), openDetail(updated.id)]);
+  const failure = refreshes.find((result) => result.status === "rejected");
+  if (failure)
+    notice(
+      `Your item was saved, but the display could not be refreshed. ${errorMessage(failure.reason)}`,
+      true,
+    );
+}
+
+function renderInstallation(data) {
+  byId("installation-summary").textContent = data.integration_connected
+    ? "Home Assistant connected"
+    : "Pairing needed";
+  const list = byId("installation-checks");
+  list.replaceChildren();
+  const backupLabels = {
+    complete: "Complete",
+    app_only: "App data only",
+    missing: "Not included",
+    outdated: "Out of date",
+    unavailable: "Unavailable",
+    standalone: "Managed outside Home Assistant",
+  };
+  for (const [label, value] of [
+    ["Home Assistant", data.integration_connected ? "Connected" : "Not paired"],
+    ["Backup coverage", backupLabels[data.backup.status] || "Unknown"],
+    ["Version", data.version],
+  ]) {
+    const row = element("li");
+    row.append(element("strong", label), element("span", value));
+    list.append(row);
+  }
+  byId("backup-date").textContent = data.backup.last_backup
+    ? `Last backup: ${timestampLabel(data.backup.last_backup * 1000)}`
+    : "No backup has been recorded by the service.";
+}
+
+async function loadInstallation(check = false) {
+  byId("check-installation").disabled = true;
+  byId("installation-error").textContent = "";
+  try {
+    renderInstallation(
+      await api(
+        `v1/installation${check ? "/check" : ""}`,
+        check ? { method: "POST" } : {},
+      ),
+    );
+  } catch (error) {
+    byId("installation-error").textContent = errorMessage(error);
+  } finally {
+    byId("check-installation").disabled = false;
+  }
+}
+
+async function connect() {
+  const system = await api("v1/system");
+  connected = true;
+  isOwner = system.credential_role === "owner";
+  byId("login").hidden = true;
+  byId("dashboard").hidden = false;
+  byId("add").hidden = !isOwner;
+  byId("installation").hidden = !isOwner;
+  byId("token").value = "";
+  byId("health").textContent =
+    `Maintenance ${system.version} · ${system.integration_connected ? "Home Assistant connected" : "Home Assistant not paired"}`;
+  notice("");
+  await load();
+  if (isOwner) await loadInstallation();
+  const id = routeId();
+  if (id) await openDetail(id, false);
+}
+
+byId("login").addEventListener(
+  "submit",
+  guarded(async () => {
+    token = byId("token").value.trim();
+    byId("connect").disabled = true;
+    try {
+      await connect();
+    } catch (error) {
+      if (!connected) token = "";
+      throw error;
+    } finally {
+      byId("connect").disabled = false;
+    }
+  }),
+);
+byId("add").addEventListener("click", () => openEditor());
+byId("refresh").addEventListener(
+  "click",
+  guarded(async () => {
+    notice("");
+    await load();
+  }),
+);
+byId("query").addEventListener("input", renderList);
+byId("view").addEventListener(
+  "change",
+  guarded(async () => {
+    if ((byId("view").value === "archived") !== loadedArchive) await load();
+    else renderList();
+  }),
+);
+byId("home").addEventListener("click", (event) => {
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault();
+  byId("editor").close();
+  closeDetail();
+});
+byId("close-detail").addEventListener("click", () => closeDetail());
+byId("detail").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeDetail();
+});
+byId("more-events").addEventListener("click", () => loadEvents());
+byId("close-editor").addEventListener("click", () => {
+  if (!editorBusy) byId("editor").close();
+});
+byId("editor").addEventListener("cancel", (event) => {
+  if (editorBusy) event.preventDefault();
+});
+byId("edit-form").addEventListener("submit", guarded(saveItem, "edit-error"));
+byId("reload-edit").addEventListener(
+  "click",
+  guarded(async () => {
+    if (editing)
+      openEditor(await api(`v1/items/${encodeURIComponent(editing.id)}`));
+  }, "edit-error"),
+);
+byId("item-id").addEventListener("input", () => {
+  editorIdTouched = true;
+});
+byId("name").addEventListener("input", () => {
+  if (!editing && !editorIdTouched)
+    byId("item-id").value = byId("name")
+      .value.toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 80)
+      .replace(/-$/, "");
+});
+for (const unit of ["years", "months", "days"])
+  byId(unit).addEventListener("input", () =>
+    byId("days").setCustomValidity(""),
+  );
+byId("add-spec").addEventListener("click", () =>
+  addMetadataRow("spec").querySelector("input").focus(),
+);
+byId("add-resource").addEventListener("click", () =>
+  addMetadataRow("resource").querySelector("input").focus(),
+);
+byId("check-installation").addEventListener("click", () =>
+  loadInstallation(true),
+);
+window.addEventListener(
+  "popstate",
+  guarded(async () => {
+    if (!connected) return;
+    byId("editor").close();
+    const id = routeId();
+    if (id) await openDetail(id, false);
+    else closeDetail(false);
+  }),
+);
+
+if (isEmbedded) {
+  window.addEventListener(
+    "message",
+    guarded(async (event) => {
+      if (
+        event.source !== window.parent ||
+        event.origin !== location.origin ||
+        event.data?.type !== "home-assistant/properties"
+      )
+        return;
+      const prefix = event.data.route?.prefix;
+      if (typeof prefix === "string" && /^\/[a-zA-Z0-9/_-]+$/.test(prefix))
+        parentPrefix = prefix.replace(/\/$/, "");
+      const path = event.data.route?.path;
+      if (
+        typeof path !== "string" ||
+        !/^\/(?:items\/[a-z0-9]+(?:-[a-z0-9]+)*)?\/?$/.test(path)
+      )
+        return;
+      const next = new URL(path.replace(/^\//, ""), base);
+      if (next.pathname === location.pathname) return;
+      history.replaceState(null, "", next.pathname);
+      if (!connected) return;
+      const id = routeId();
+      if (id) await openDetail(id, false);
+      else closeDetail(false);
+    }),
+  );
+  window.parent.postMessage(
+    { type: "home-assistant/subscribe-properties" },
+    location.origin,
+  );
+}
+
+connect().catch((error) => {
+  if (
+    !connected &&
+    error instanceof ApiError &&
+    [401, 403].includes(error.status)
+  ) {
+    byId("login").hidden = false;
+    byId("token").focus();
+  } else notice(errorMessage(error), true);
+});

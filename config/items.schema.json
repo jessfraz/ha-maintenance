@@ -1,81 +1,195 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/jessfraz/home-maintenance/config/items.schema.json",
-  "title": "Home Maintenance catalog",
+  "title": "Maintenance import",
   "type": "object",
   "additionalProperties": false,
-  "required": ["title", "timezone", "todo_entity", "items"],
+  "required": [
+    "items"
+  ],
   "properties": {
-    "$schema": { "type": "string" },
-    "title": { "type": "string", "minLength": 1 },
-    "timezone": { "type": "string", "minLength": 1 },
-    "todo_entity": { "type": "string", "pattern": "^todo\\." },
-    "due_soon_days": { "type": "integer", "minimum": 0 },
     "items": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/item" }
+      "items": {
+        "$ref": "#/$defs/item"
+      },
+      "maxItems": 200
     }
   },
   "$defs": {
-    "item": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "name", "ha_summary", "schedule"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
-        "name": { "type": "string", "minLength": 1 },
-        "location": { "type": "string" },
-        "group": { "type": "string" },
-        "ha_summary": { "type": "string", "minLength": 1 },
-        "ha_description": { "type": "string" },
-        "schedule": { "$ref": "#/$defs/schedule" },
-        "initial_due": { "type": "string", "format": "date" },
-        "reorder_url": { "type": "string", "format": "uri", "pattern": "^https?://" },
-        "instructions": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
-        },
-        "specs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/spec" }
-        },
-        "resources": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/link" }
-        }
-      }
-    },
     "schedule": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "days": { "type": "integer", "minimum": 0 },
-        "months": { "type": "integer", "minimum": 0 },
-        "years": { "type": "integer", "minimum": 0 }
+        "days": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 36600
+        },
+        "months": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1200
+        },
+        "years": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
       },
       "anyOf": [
-        { "required": ["days"], "properties": { "days": { "minimum": 1 } } },
-        { "required": ["months"], "properties": { "months": { "minimum": 1 } } },
-        { "required": ["years"], "properties": { "years": { "minimum": 1 } } }
+        {
+          "required": [
+            "days"
+          ],
+          "properties": {
+            "days": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "months"
+          ],
+          "properties": {
+            "months": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "years"
+          ],
+          "properties": {
+            "years": {
+              "minimum": 1
+            }
+          }
+        }
       ]
     },
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["label", "value"],
+      "required": [
+        "label",
+        "value"
+      ],
       "properties": {
-        "label": { "type": "string", "minLength": 1 },
-        "value": { "type": "string", "minLength": 1 }
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
       }
     },
-    "link": {
+    "resource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["label", "url"],
+      "required": [
+        "label",
+        "url"
+      ],
       "properties": {
-        "label": { "type": "string", "minLength": 1 },
-        "url": { "type": "string", "format": "uri", "pattern": "^https?://" }
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://",
+          "maxLength": 2048
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "timezone",
+        "due",
+        "schedule"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "maxLength": 80
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IANA time zone name."
+        },
+        "due": {
+          "type": "string",
+          "format": "date"
+        },
+        "schedule": {
+          "$ref": "#/$defs/schedule"
+        },
+        "location": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "group": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        },
+        "reorder_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri",
+          "pattern": "^https?://",
+          "maxLength": 2048
+        },
+        "instructions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "maxItems": 100
+        },
+        "specs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/spec"
+          },
+          "maxItems": 100
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resource"
+          },
+          "maxItems": 100
+        }
       }
     }
   }

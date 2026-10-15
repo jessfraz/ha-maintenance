@@ -1,4 +1,2 @@
-configuration:
-  config_file:
-    name: Catalog filename
-    description: JSON catalog filename in the app addon_config directory
+# No app options are required. Pair the integration through Supervisor discovery.
+configuration: {}

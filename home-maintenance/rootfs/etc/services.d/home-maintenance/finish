@@ -1,7 +1,0 @@
-#!/usr/bin/with-contenv bashio
-
-if [ "$1" -ne 0 ] && [ "$1" -ne 256 ]; then
-    bashio::log.error "Home Maintenance exited with code $1 (by signal $2)"
-    echo "$1" > /run/s6-linux-init-container-results/exitcode
-    exec /run/s6/basedir/bin/halt
-fi

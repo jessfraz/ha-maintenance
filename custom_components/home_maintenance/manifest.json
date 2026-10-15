@@ -1,0 +1,17 @@
+{
+  "domain": "home_maintenance",
+  "name": "Maintenance",
+  "codeowners": [
+    "@jessfraz"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http"
+  ],
+  "documentation": "https://github.com/jessfraz/ha-maintenance",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

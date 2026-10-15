@@ -1,80 +1,112 @@
-# Home Maintenance
+# Installation
 
-## Configuration
+Install both parts:
 
-```yaml
-config_file: items.json
-```
+- The **Maintenance app** runs the Rust service, SQLite database, and dashboard.
+- The **Maintenance integration**, installed through HACS, adds sensors,
+  actions, and a native to-do entity.
 
-`config_file` is resolved inside this app's `addon_config` directory. Copy the
-repository's `config/items.example.json` to that directory as `items.json`, then
-replace the examples with private household data.
+Use `https://github.com/jessfraz/ha-maintenance` for both repositories.
 
-On the Home Assistant host, the file is
-`/addon_configs/<repository>_home_maintenance/items.json`. `<repository>` is
-`local` for a local app or the generated identifier for the repository that
-provided the app. Keep the source catalog somewhere private, deploy an exact
-copy, verify the two checksums, and restart this app after every catalog change.
-The catalog is loaded once when the process starts.
+## Start the app
 
-The configured `todo_entity` must already exist. Create a Local To-do list in
-Home Assistant, or use another to-do integration that can create and update
-items with due dates and descriptions, before starting this app.
+Add the repository in **Settings → Apps → App store → Repositories**, then
+install and start **Maintenance**. No app options are required. The app saves
+separate owner and integration credentials automatically.
 
-The catalog is the source of truth. At startup and every 15 seconds, the app:
+Administrators can open the dashboard from the app page or enable **Show in
+sidebar**. Supervisor enforces administrator access to the app dashboard.
+Other Home Assistant users complete tasks through the native to-do entity or
+integration actions. Home Assistant authenticates dashboard access through
+ingress; server credentials stay out of the browser. The ingress listener
+accepts only the Supervisor gateway.
 
-1. adopts an existing active todo with the exact configured `ha_summary`;
-2. adds a hidden stable item marker to the todo description;
-3. repairs its summary, due date, and description from catalog/history state;
-4. creates a missing current occurrence when an initial or computed due date is
-   available.
+## Pair the integration
 
-Completing a retained managed item directly in Home Assistant is detected and
-scheduled on the next sync. Home Assistant does not expose the responsible user
-through the todo API, so those events are attributed to `Home Assistant` rather
-than inventing a person. The NFC app records the actual ingress user.
+1. Open **HACS → ⋮ → Custom repositories**.
+2. Add `https://github.com/jessfraz/ha-maintenance` as an **Integration**.
+3. Download **Maintenance**, then restart Home Assistant.
+4. In **Settings → Devices & services**, confirm the discovered **Maintenance**
+   integration.
 
-Unrelated todo items are not changed. Multiple active matches stop the sync and
-surface an error in the UI so the app never chooses or deletes one silently.
-Changing an item's cadence recalculates its current due date from the most
-recent completion, so the JSON catalog remains authoritative after edits too.
+Supervisor discovery supplies a separate integration credential. Internal app
+networking requires no host port mapping. If discovery is absent, choose
+**Add integration → Maintenance** and connect the Home Assistant app.
+Reauthentication uses the same discovery path after credentials change.
+
+Check the app's service status and the integration's availability after
+pairing. The service reports a recent authenticated integration connection;
+a running app alone does not establish that pairing succeeded.
+
+## Add items
+
+Use the dashboard or authenticated API to create an item. Give it a permanent
+ID, a name, time zone, due date, and recurrence. Instructions, specifications,
+resource links, group, location, and reorder link are optional.
+
+An explicit catalog import uses `POST /v1/imports`. Start from the
+repository's fictional `config/items.example.json`. Import is atomic and
+rejects existing IDs; it is an admission operation rather than continuous
+catalog reconciliation. Current schedules and history belong to SQLite.
+
+Completing an item records the authenticated Home Assistant user when
+available. Automations are recorded as system actions. The service schedules
+the next occurrence atomically. A retry cannot silently complete another
+occurrence. Concurrent edits report a conflict for review.
 
 ## NFC tags
 
-Open the item from this app and copy the browser address to the NFC tag. The
-address must use Home Assistant's `/app/.../items/<item-id>` route, not an
-ingress session URL. The former is stable and authenticated; the latter is
-temporary.
+Open the item and copy its stable authenticated app route to the tag:
 
-The repository URL participates in Home Assistant's app slug. Finalize that URL
-before programming tags, and treat each JSON `item.id` as immutable afterward.
+```text
+https://home-assistant.example/app/<repository-app-slug>/items/example-air-filter
+```
 
-## Migrating existing tasks
+Temporary ingress session URLs expire. Keep the repository URL and item IDs
+stable after programming tags. Archive retired items to preserve history.
 
-Take a full backup and disable old recurrence automations before the first
-start. Split any combined legacy task into the independently replaceable items
-represented by the catalog. Rename or retire legacy tasks so each configured
-`ha_summary` has no more than one active match. Start the app, verify one marked
-active todo per item, and only then remove obsolete tasks.
+## Standalone Docker
 
-To retire a managed item later, first complete or delete its current todo and
-remove its NFC tag, then remove it from JSON. The app intentionally never
-auto-deletes a task merely because an item disappeared from the catalog.
+The same image runs without Home Assistant. Generate two distinct credentials
+of at least 32 characters and save them in your password manager. Supply the
+owner credential through `MAINTENANCE_API_TOKEN` and the dedicated Home
+Assistant credential through `MAINTENANCE_INTEGRATION_TOKEN`:
 
-## Completion history
+```sh
+docker run --detach --name maintenance --restart unless-stopped \
+  --publish 127.0.0.1:8080:8080 \
+  --mount type=volume,source=maintenance-data,target=/data \
+  --env MAINTENANCE_API_TOKEN \
+  --env MAINTENANCE_INTEGRATION_TOKEN \
+  ghcr.io/jessfraz/ha-maintenance:0.1.0
+```
 
-History is stored in `/data/history.db` and included in cold app backups.
-Existing Home Assistant todos do not reliably preserve who completed older
-occurrences, so the app reports history beginning with the first completion
-recorded here.
+The image supports amd64 and arm64. The server runs as uid 10001 and keeps its
+database in `/data`. App mode also saves generated pairing credentials there. Use TLS when accessing the service across
+an untrusted network.
 
-The private catalog uses the app-specific `addon_config` mount, which Home
-Assistant also includes when that app is selected in a backup. Restoring the app
-therefore restores both inputs needed to reconstruct the system: `items.json`
-and `history.db`. The app uses `backup: cold`, so Supervisor stops it before
-copying SQLite and starts it again afterward.
+To pair a standalone service, install the HACS integration, restart Home
+Assistant, choose **Add integration → Maintenance**, then select the standalone
+connection and supply its URL and the integration credential. Home Assistant must be able to
+reach the service. The app's optional `8080/tcp` mapping exposes the
+bearer-authenticated API; ingress port 8099 is internal.
 
-A full Home Assistant backup also restores the Core-side to-do entity. An
-app-only restore reconstructs current occurrences from `items.json` and
-`history.db`, but the configured to-do entity must exist on the destination
-system first.
+## Backups and restore
+
+The database is `/data/maintenance.sqlite3`; generated app credentials are in
+`/data/credentials.json`. The app uses a cold backup so Supervisor stops it
+before copying SQLite. Include both the app and Home Assistant configuration
+to preserve the service state and paired integration together.
+
+Treat backups as private. They contain item details, completion history, and
+credentials. For a manual backup, stop the container cleanly before copying
+the complete `/data` volume. Restore that volume before starting the service.
+CI verifies a cold-volume restore into a fresh container; this does not prove
+that a particular Home Assistant backup has been restored successfully.
+
+## Updates
+
+A matching `vVERSION` release tag publishes the amd64 and arm64 image after
+both native smoke tests pass. Update the app in the App Store and the
+integration through HACS, then restart Home Assistant. Back up both parts
+before upgrading.

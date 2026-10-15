@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Check that the service, integration, and app describe the same release."""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent.parent
+    crate = tomllib.loads((root / "Cargo.toml").read_text())
+    python = tomllib.loads((root / "pyproject.toml").read_text())
+    integration = json.loads(
+        (root / "custom_components/home_maintenance/manifest.json").read_text()
+    )
+    app = (root / "home-maintenance/config.yaml").read_text()
+    app_version = re.search(r'^version: "([^"]+)"$', app, re.MULTILINE)
+    if app_version is None:
+        raise SystemExit("App manifest needs a quoted version")
+    versions = {
+        "Cargo.toml": crate["package"]["version"],
+        "pyproject.toml": python["project"]["version"],
+        "integration manifest": integration["version"],
+        "app manifest": app_version[1],
+    }
+    if len(sys.argv) > 2:
+        raise SystemExit("Usage: check-release-version [vVERSION]")
+    if len(sys.argv) == 2:
+        if not re.fullmatch(
+            r"v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", sys.argv[1]
+        ):
+            raise SystemExit("Release tag must be v followed by a semantic version")
+        versions["release tag"] = sys.argv[1][1:]
+    if len(set(versions.values())) != 1:
+        raise SystemExit(
+            "Release versions differ: "
+            + ", ".join(f"{name}={version}" for name, version in versions.items())
+        )
+    if integration["domain"] != "home_maintenance":
+        raise SystemExit("Integration domain must match the app's discovery service")
+    print(f"Release versions agree: {versions['Cargo.toml']}")
+
+
+if __name__ == "__main__":
+    main()

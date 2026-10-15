@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-- Initial experimental release.
-- JSON-driven Home Assistant todo reconciliation.
-- Authenticated NFC item pages and one-action completion.
-- Durable SQLite completion history with HA ingress user attribution.
+- Rust service with Dropshot, SQLite, and typed OpenAPI routes.
+- Thin Home Assistant integration with pairing, sensors, actions, and a native to-do list.
+- Atomic, revision-checked completion with durable retry handling and completion history.
+- Authenticated item pages, calendar-aware recurrence, and NFC deep links.

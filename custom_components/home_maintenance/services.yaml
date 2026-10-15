@@ -1,0 +1,26 @@
+complete:
+  name: Complete an occurrence
+  description: Record completion and let the Maintenance service schedule the next occurrence.
+  fields:
+    item_id:
+      name: Item ID
+      description: The task's stable ID, such as replace-filter.
+      required: true
+      selector:
+        text:
+    occurrence_id:
+      name: Occurrence ID
+      description: The current occurrence UUID. A stale occurrence is never applied to a future task.
+      required: true
+      selector:
+        text:
+    if_match:
+      name: Item version
+      description: Optional ETag from the item response. Otherwise the current version is fetched once.
+      selector:
+        text:
+    idempotency_key:
+      name: Idempotency key
+      description: Reuse this key only when retrying the same completion.
+      selector:
+        text:

@@ -1,0 +1,32 @@
+[package]
+name = "home-maintenance"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Local maintenance schedules and history for Home Assistant"
+repository = "https://github.com/jessfraz/ha-maintenance"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+dropshot = "0.17"
+getrandom = "0.4"
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+schemars = { version = "0.8", features = ["uuid1", "chrono"] }
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+slog = "2"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+
+[dev-dependencies]
+expectorate = "1"
+tempfile = "3"

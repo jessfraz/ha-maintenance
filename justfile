@@ -1,9 +1,38 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-default: test
+default: check
 
 public-tree:
     ./scripts/check-public-tree
 
-test: public-tree
-    cd home-maintenance && go test -race ./... && go vet ./...
+versions:
+    ./scripts/check-release-version
+
+rust:
+    cargo fmt --check
+    cargo clippy --locked --all --benches --tests --examples --all-features -- -D warnings
+    cargo test --locked --all-features
+
+ha:
+    cargo build --locked --bin home-maintenance
+    uv sync --frozen
+    uv run --frozen ruff check --target-version py311 scripts/check-public-tree scripts/check-release-version
+    uv run --frozen ruff format --check --target-version py311 scripts/check-public-tree scripts/check-release-version
+    uv run --frozen ruff check custom_components tests_ha
+    uv run --frozen ruff format --check custom_components tests_ha
+    MAINTENANCE_TEST_BINARY="{{justfile_directory()}}/target/debug/home-maintenance" uv run --frozen pytest tests_ha
+
+check: public-tree versions rust ha
+
+test: check
+
+security:
+    cargo deny check advisories licenses sources
+
+openapi:
+    mkdir -p work
+    cargo run --locked -- --openapi work/openapi.json
+
+container:
+    docker build --tag ha-maintenance:smoke .
+    ./scripts/container-smoke.sh ha-maintenance:smoke "$(docker image inspect ha-maintenance:smoke --format '{{{{.Architecture}}')"

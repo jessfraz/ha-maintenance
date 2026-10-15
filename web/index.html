@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <base href="__MAINTENANCE_BASE__">
+    <title>Maintenance</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <a class="wordmark" href="./" id="home" aria-label="Maintenance home"
+        >Maintenance<span aria-hidden="true">.</span></a
+      >
+      <button id="add" hidden>Add item</button>
+    </header>
+    <main>
+      <p id="notice" role="status" aria-live="polite"></p>
+      <form id="login" hidden>
+        <p class="eyebrow">YOUR MAINTENANCE, IN ORDER</p>
+        <h1>Connect to your service</h1>
+        <p class="muted">
+          Enter your owner API token. It stays in this tab’s memory.
+        </p>
+        <label for="token">API token</label>
+        <input
+          id="token"
+          name="token"
+          type="password"
+          required
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <button id="connect">Connect</button>
+      </form>
+      <section id="dashboard" hidden aria-label="Maintenance dashboard">
+        <div
+          id="summary"
+          class="summary"
+          aria-label="Maintenance summary"
+        ></div>
+        <div class="queue-heading">
+          <div>
+            <p class="eyebrow">A LITTLE UPKEEP GOES A LONG WAY</p>
+            <h1 id="queue-title">Your maintenance queue</h1>
+          </div>
+          <button id="refresh" class="quiet" aria-label="Refresh maintenance">
+            Refresh
+          </button>
+        </div>
+        <div class="toolbar">
+          <label class="search" for="query"
+            ><span class="sr-only">Search maintenance items</span>
+            <input
+              id="query"
+              type="search"
+              placeholder="Search name, location, or group"
+              autocomplete="off"
+            ></label
+          >
+          <label class="view-filter" for="view"
+            >View<select id="view">
+              <option value="active">Active</option>
+              <option value="overdue">Overdue</option>
+              <option value="due_soon">Due in 14 days</option>
+              <option value="archived">Archived</option>
+            </select></label
+          >
+        </div>
+        <p id="list-status" class="muted" role="status"></p>
+        <div id="list" class="items" aria-busy="false"></div>
+        <p id="health" class="muted health"></p>
+        <details id="installation" class="installation" hidden>
+          <summary>
+            Installation <span id="installation-summary" class="muted"></span>
+          </summary>
+          <div class="installation-heading">
+            <p class="muted">Pairing and backup coverage for this service.</p>
+            <button id="check-installation" class="quiet" type="button">
+              Run checks
+            </button>
+          </div>
+          <ul id="installation-checks"></ul>
+          <p id="backup-date" class="muted"></p>
+          <p id="installation-error" role="alert"></p>
+        </details>
+      </section>
+    </main>
+    <dialog id="detail" aria-labelledby="detail-title">
+      <div class="dialog-heading">
+        <p id="detail-location" class="eyebrow"></p>
+        <button
+          type="button"
+          class="quiet close"
+          id="close-detail"
+          aria-label="Close item"
+        >
+          ×
+        </button>
+      </div>
+      <h2 id="detail-title"></h2>
+      <div id="detail-content"></div>
+      <div id="actions" class="actions"></div>
+      <p id="detail-status" class="muted" role="status" aria-live="polite"></p>
+      <p id="detail-error" role="alert"></p>
+      <section class="history" aria-labelledby="history-title">
+        <h3 id="history-title">Completion history</h3>
+        <ol id="events"></ol>
+        <p id="events-status" class="muted" role="status"></p>
+        <button id="more-events" class="quiet" hidden>Load more history</button>
+      </section>
+    </dialog>
+    <dialog id="editor" aria-labelledby="edit-title">
+      <form id="edit-form">
+        <div class="dialog-heading">
+          <h2 id="edit-title">Add maintenance item</h2>
+          <button
+            type="button"
+            class="quiet close"
+            id="close-editor"
+            aria-label="Close editor"
+          >
+            ×
+          </button>
+        </div>
+        <fieldset id="item-fields">
+          <label for="name"
+            >Name<input
+              id="name"
+              name="name"
+              required
+              maxlength="200"
+              autocomplete="off"
+            ></label
+          >
+          <label for="item-id"
+            >Item ID<input
+              id="item-id"
+              name="id"
+              required
+              maxlength="80"
+              pattern="[a-z0-9]+(-[a-z0-9]+)*"
+              aria-describedby="id-help"
+              autocomplete="off"
+              spellcheck="false"
+            ></label
+          >
+          <p id="id-help" class="field-help">
+            A stable ID for this item’s link and NFC tag. Use lowercase letters,
+            numbers, and hyphens.
+          </p>
+          <div class="columns">
+            <label for="location"
+              >Location<input
+                id="location"
+                name="location"
+                maxlength="200"
+              ></label
+            ><label for="group"
+              >Group<input id="group" name="group" maxlength="200"></label
+            >
+          </div>
+          <div class="columns">
+            <label for="due"
+              >Next due<input
+                id="due"
+                name="due"
+                type="date"
+                required
+                min="0001-01-01"
+                max="9999-12-31"
+              ></label
+            ><label for="timezone"
+              >Time zone<input
+                id="timezone"
+                name="timezone"
+                required
+                maxlength="100"
+                list="timezones"
+                autocomplete="off"
+              >
+              <datalist id="timezones">
+                <option value="UTC"></option>
+              </datalist></label
+            >
+          </div>
+          <fieldset class="schedule">
+            <legend>Repeat after completion</legend>
+            <div class="columns schedule-fields">
+              <label for="years"
+                >Years<input
+                  id="years"
+                  name="years"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  required
+                  value="0"
+                ></label
+              ><label for="months"
+                >Months<input
+                  id="months"
+                  name="months"
+                  type="number"
+                  min="0"
+                  max="1200"
+                  step="1"
+                  required
+                  value="0"
+                ></label
+              ><label for="days"
+                >Days<input
+                  id="days"
+                  name="days"
+                  type="number"
+                  min="0"
+                  max="36600"
+                  step="1"
+                  required
+                  value="30"
+                ></label
+              >
+            </div>
+            <p class="field-help">
+              Choose at least one day, month, or year. Calendar months and years
+              stay on a calendar cadence.
+            </p>
+          </fieldset>
+          <label for="instructions"
+            >Instructions<textarea
+              id="instructions"
+              name="instructions"
+              rows="4"
+              placeholder="One step per line"
+            ></textarea></label
+          >
+          <section class="editor-section" aria-labelledby="specs-title">
+            <div class="section-heading">
+              <h3 id="specs-title">Specifications</h3>
+              <button type="button" id="add-spec" class="quiet small">
+                Add specification
+              </button>
+            </div>
+            <div id="spec-rows"></div>
+          </section>
+          <section class="editor-section" aria-labelledby="resources-title">
+            <div class="section-heading">
+              <h3 id="resources-title">Reference links</h3>
+              <button type="button" id="add-resource" class="quiet small">
+                Add link
+              </button>
+            </div>
+            <div id="resource-rows"></div>
+          </section>
+          <label for="reorder-url"
+            >Reorder link<input
+              id="reorder-url"
+              name="reorder_url"
+              type="url"
+              placeholder="https://"
+              maxlength="2000"
+            ></label
+          >
+        </fieldset>
+        <p id="edit-error" role="alert"></p>
+        <div class="actions">
+          <button id="save">Save item</button
+          ><button id="reload-edit" type="button" class="quiet" hidden>
+            Load latest version
+          </button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

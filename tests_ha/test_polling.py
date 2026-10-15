@@ -1,0 +1,112 @@
+"""The coordinator follows real cursor pages and rejects partial snapshots."""
+
+import json
+
+import pytest
+from aiohttp import web
+from homeassistant.core import HomeAssistant
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.home_maintenance.const import (
+    CONF_BACKEND_URL,
+    CONF_TOKEN,
+    DOMAIN,
+)
+
+from .conftest import (
+    NEXT_OCCURRENCE_ID,
+    SUMMARY,
+    Backend,
+    item_record,
+)
+
+
+async def test_native_todo_follows_the_entire_inventory(
+    hass: HomeAssistant, aiohttp_server, socket_enabled
+) -> None:
+    requests: list[dict[str, str]] = []
+
+    async def handle(request: web.Request) -> web.Response:
+        assert request.headers["Authorization"] == "Bearer test-token"
+        if request.path == "/v1/summary":
+            return web.json_response(SUMMARY)
+        requests.append(dict(request.query))
+        if request.query.get("page_token") == "next+page":
+            return web.json_response(
+                {
+                    "items": [
+                        item_record(
+                            item_id="second-filter", occurrence_id=NEXT_OCCURRENCE_ID
+                        )
+                    ],
+                    "next_page": None,
+                }
+            )
+        return web.json_response({"items": [item_record()], "next_page": "next+page"})
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", handle)
+    server = await aiohttp_server(app)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: str(server.make_url("")).rstrip("/"),
+            CONF_TOKEN: "test-token",
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert requests == [{"limit": "200"}, {"limit": "200", "page_token": "next+page"}]
+    assert {item.id for item in entry.runtime_data.data.items} == {
+        "replace-filter",
+        "second-filter",
+    }
+    assert hass.states.get("todo.maintenance").state == "2"
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"items": [item_record(), item_record()], "next_page": None},
+        {"items": [{**item_record(), "revision": True}], "next_page": None},
+        {"items": [item_record()], "next_page": "repeated-cursor"},
+        {"items": [], "next_page": False},
+        {
+            "items": [item_record(), item_record(item_id="second-filter")],
+            "next_page": None,
+        },
+    ],
+    ids=[
+        "duplicate-id",
+        "invalid-revision",
+        "cursor-loop",
+        "invalid-cursor",
+        "duplicate-uid",
+    ],
+)
+async def test_invalid_page_preserves_previous_snapshot_and_marks_unavailable(
+    hass: HomeAssistant, entry, backend: Backend, page: dict[str, object]
+) -> None:
+    previous = entry.runtime_data.data
+    backend.responses[("GET", "/v1/items")] = (200, json.dumps(page).encode(), {})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert not entry.runtime_data.last_update_success
+    assert entry.runtime_data.data == previous
+    assert hass.states.get("todo.maintenance").state == "unavailable"
+
+
+async def test_partial_inventory_auth_failure_requests_reauthentication(
+    hass: HomeAssistant, entry, backend: Backend
+) -> None:
+    previous = entry.runtime_data.data
+    backend.responses[("GET", "/v1/items")] = (401, b"{}", {})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert not entry.runtime_data.last_update_success
+    assert entry.runtime_data.data == previous
+    assert any(
+        flow["context"].get("entry_id") == entry.entry_id
+        for flow in hass.config_entries.flow.async_progress()
+    )
