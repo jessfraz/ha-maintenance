@@ -222,6 +222,11 @@ function safeLink(url, label) {
   }
 }
 
+// Location and group often match ("Exterior"); show a shared value once.
+function itemPlace(item) {
+  return [...new Set([item.location, item.group].filter(Boolean))].join(" / ");
+}
+
 function renderSummary(summary) {
   const root = byId("summary");
   root.replaceChildren();
@@ -268,7 +273,7 @@ function renderList() {
   const root = byId("list");
   root.replaceChildren();
   byId("queue-title").textContent =
-    view === "archived" ? "Archived maintenance" : "Your maintenance queue";
+    view === "archived" ? "Archived" : "Queue";
   byId("list-status").textContent =
     `${visible.length} ${visible.length === 1 ? "item" : "items"}${query ? ` matching “${byId("query").value.trim()}”` : ""} · earliest due first`;
   if (!visible.length) {
@@ -281,14 +286,14 @@ function renderList() {
           ? "Nothing due in the next two weeks"
           : view === "archived"
             ? "No archived items"
-            : "A fresh start";
+            : "No items";
     const copy = query
       ? "Try a different task, item name, location, or group."
       : view === "active"
         ? isOwner
-          ? "Add your first maintenance item to build a queue that keeps itself in order."
-          : "Maintenance items will appear here when they are added."
-        : "Choose another view to see the rest of your maintenance.";
+          ? "Add an item to start the queue."
+          : "Items appear here when an owner adds them."
+        : "Choose another view.";
     empty.append(element("h2", title), element("p", copy));
     root.append(empty);
   }
@@ -299,14 +304,8 @@ function renderList() {
       `item-card${item.archived ? " archived" : ""}`,
     );
     const content = element("div");
-    content.append(
-      element(
-        "p",
-        [item.location, item.group].filter(Boolean).join(" / ") ||
-          "MAINTENANCE",
-        "eyebrow",
-      ),
-    );
+    const place = itemPlace(item);
+    if (place) content.append(element("p", place, "item-place"));
     const link = element("a", item.summary);
     link.href = new URL(itemPath(item.id), base).href;
     link.addEventListener("click", (event) => {
@@ -526,8 +525,7 @@ function renderDetail() {
   const item = selected;
   if (!item) return;
   byId("detail-title").textContent = item.summary;
-  byId("detail-location").textContent =
-    [item.location, item.group].filter(Boolean).join(" / ") || "MAINTENANCE";
+  byId("detail-location").textContent = itemPlace(item);
   const root = byId("detail-content");
   root.replaceChildren();
   root.append(element("p", item.name, "detail-item-name"));
@@ -1247,8 +1245,11 @@ async function connect() {
   byId("add").hidden = !isOwner;
   byId("installation").hidden = !isOwner;
   byId("token").value = "";
-  byId("health").textContent =
-    `Maintenance ${system.version} · ${system.integration_connected ? "Home Assistant connected" : "Home Assistant not paired"}`;
+  byId("app-version").textContent = system.version;
+  byId("service-status").textContent = system.integration_connected
+    ? "Home Assistant connected"
+    : "Home Assistant not paired";
+  byId("app-footer").hidden = false;
   notice("");
   await load();
   if (isOwner) await loadInstallation();

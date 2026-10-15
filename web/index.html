@@ -12,15 +12,14 @@
   <body>
     <header class="app-header">
       <a class="wordmark" href="./" id="home" aria-label="Maintenance home"
-        >Maintenance<span aria-hidden="true">.</span></a
+        >Maintenance</a
       >
       <button id="add" hidden>Add item</button>
     </header>
     <main>
       <p id="notice" role="status" aria-live="polite"></p>
       <form id="login" hidden>
-        <p class="eyebrow">YOUR MAINTENANCE, IN ORDER</p>
-        <h1>Connect to your service</h1>
+        <h1>Connect</h1>
         <p class="muted">
           Enter your owner API token. It stays in this tab’s memory.
         </p>
@@ -43,8 +42,7 @@
         ></div>
         <div class="queue-heading">
           <div>
-            <p class="eyebrow">A LITTLE UPKEEP GOES A LONG WAY</p>
-            <h1 id="queue-title">Your maintenance queue</h1>
+            <h1 id="queue-title">Queue</h1>
           </div>
           <button id="refresh" class="quiet" aria-label="Refresh maintenance">
             Refresh
@@ -71,7 +69,6 @@
         </div>
         <p id="list-status" class="muted" role="status"></p>
         <div id="list" class="items" aria-busy="false"></div>
-        <p id="health" class="muted health"></p>
         <details id="installation" class="installation" hidden>
           <summary>
             Installation <span id="installation-summary" class="muted"></span>
@@ -88,6 +85,10 @@
         </details>
       </section>
     </main>
+    <footer id="app-footer" class="app-footer" hidden>
+      <p>Maintenance <span id="app-version" class="app-version"></span></p>
+      <p id="service-status"></p>
+    </footer>
     <dialog id="detail" aria-labelledby="detail-title">
       <div class="dialog-heading">
         <p id="detail-location" class="eyebrow"></p>
@@ -189,7 +190,7 @@
                 type="date"
                 required
                 min="0001-01-01"
-                max="9999-12-31"
+                max="9999-12-30"
               ></label
             ><label for="timezone"
               >Time zone<input
