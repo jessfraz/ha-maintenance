@@ -3,7 +3,7 @@
 Maintenance is a local maintenance tracker with a Rust service, SQLite, and a
 thin Home Assistant integration. Items, schedules, current occurrences, and
 completion history live in the service. Home Assistant exposes the same state
-through sensors, actions, and a native to-do list.
+through sensors, actions, a native to-do list, and a calendar.
 
 The repository follows [Shipments](https://github.com/jessfraz/ha-packages):
 Dropshot routes and typed OpenAPI, SQLx migrations, an embedded dashboard,
@@ -51,6 +51,21 @@ https://home-assistant.example/app/<repository-app-slug>/items/example-air-filte
 
 Copy the stable app route, rather than a temporary ingress session URL. Keep
 item IDs stable after writing tags. Archiving an item retains its history.
+
+The integration adds `calendar.maintenance` for calendar cards and calendar
+automations. Each active task appears as an all-day event on its current due
+date, with its summary, description, instructions, checklist progress, and
+location. Dates stay on the same calendar day in Home Assistant's time zone,
+including daylight-saving changes. Archived tasks are excluded.
+Due dates range from `0001-01-01` through `9999-12-30`, leaving a representable
+following day for each event's exclusive end.
+
+The calendar is read-only. Complete work through the to-do list, dashboard,
+or integration actions; the next due date then replaces the completed event.
+Only the current occurrence appears because recurrence starts from actual
+completion. Overdue dates stay in the past, while the to-do list and overdue
+sensor continue to show unfinished work. The calendar shares the integration's
+60-second refresh and updates immediately after integration actions.
 
 ## API
 

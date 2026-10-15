@@ -144,6 +144,74 @@ async fn set_step(f: &Fixture, item: &Item, step_id: Uuid, completed: bool, key:
 }
 
 #[tokio::test]
+async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
+    let f = Fixture::new().await;
+    let last_day = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
+    let last_due = NaiveDate::from_ymd_opt(9999, 12, 30).unwrap();
+    let mut invalid = input("example-invalid-date");
+    invalid.due = last_day;
+    let response = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "invalid-calendar-date")
+        .json(&invalid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let mut valid = input("example-last-due");
+    valid.due = last_due;
+    let response = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "last-calendar-date")
+        .json(&valid)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let item: Item = response.json().await.unwrap();
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .json(&UpdateItem {
+            due: Change(Some(last_day)),
+            ..UpdateItem::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(f.get(item.id.as_ref()).await.occurrence.due, last_due);
+
+    let response = f
+        .client
+        .post(format!("{}/v1/imports", f.origin))
+        .bearer_auth(OWNER)
+        .json(&ImportCatalog {
+            items: vec![input("example-import-date"), invalid],
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = f
+        .client
+        .get(format!("{}/v1/items/example-import-date", f.origin))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    f.finish().await;
+}
+
+#[tokio::test]
 async fn checklist_checks_are_replayable_and_only_parent_completion_advances_the_schedule() {
     let f = Fixture::new().await;
     let before = f.create("example-checklist").await;

@@ -339,6 +339,18 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     entry = configured["result"]
     admin = await hass_client()
     user = await hass_client(hass_user_token)
+
+    async def calendar_events(due: date) -> list[dict[str, object]]:
+        response = await user.get(
+            "/api/calendars/calendar.maintenance",
+            params={
+                "start": f"{due.isoformat()}T00:00:00Z",
+                "end": f"{(due + timedelta(days=2)).isoformat()}T00:00:00Z",
+            },
+        )
+        assert response.status == 200
+        return await response.json()
+
     created = await admin.post(
         f"{PREFIX}/items",
         json={
@@ -374,6 +386,12 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
         "Checklist (0/2 complete)"
         in todo["todo.maintenance"]["items"][0]["description"]
     )
+    scheduled = await calendar_events(original.due)
+    assert len(scheduled) == 1
+    assert scheduled[0]["uid"] == str(original.occurrence_id)
+    assert scheduled[0]["start"] == {"date": original.due.isoformat()}
+    assert scheduled[0]["summary"] == original.summary
+    assert "Checklist (0/2 complete)" in scheduled[0]["description"]
 
     first_step = {
         "item_id": original.id,
@@ -424,6 +442,9 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     assert current.checklist[1].completion.actor.id == "ha:automation"
     assert hass.states.get("todo.maintenance").state == "1"
     assert entry.runtime_data.data.summary["completed"] == 0
+    scheduled = await calendar_events(original.due)
+    assert scheduled[0]["uid"] == str(original.occurrence_id)
+    assert "Checklist (2/2 complete)" in scheduled[0]["description"]
 
     await hass.services.async_call(
         "todo",
@@ -444,6 +465,15 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
         step.id for step in original.checklist
     )
     assert all(step.completion is None for step in successor.checklist)
+    assert await calendar_events(original.due) == []
+    scheduled = await calendar_events(successor.due)
+    assert len(scheduled) == 1
+    assert scheduled[0]["uid"] == str(successor.occurrence_id)
+    assert scheduled[0]["start"] == {"date": successor.due.isoformat()}
+    assert scheduled[0]["end"] == {
+        "date": (successor.due + timedelta(days=1)).isoformat()
+    }
+    assert "Checklist (0/2 complete)" in scheduled[0]["description"]
     events_response = await user.get(f"{PREFIX}/items/{original.id}/events")
     events = await events_response.json()
     assert len(events["items"]) == 1

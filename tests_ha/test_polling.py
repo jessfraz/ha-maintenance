@@ -21,7 +21,7 @@ from .conftest import (
 )
 
 
-async def test_native_todo_follows_the_entire_inventory(
+async def test_native_entities_follow_the_entire_inventory(
     hass: HomeAssistant, aiohttp_server, socket_enabled
 ) -> None:
     requests: list[dict[str, str]] = []
@@ -36,7 +36,9 @@ async def test_native_todo_follows_the_entire_inventory(
                 {
                     "items": [
                         item_record(
-                            item_id="second-filter", occurrence_id=NEXT_OCCURRENCE_ID
+                            item_id="second-filter",
+                            occurrence_id=NEXT_OCCURRENCE_ID,
+                            summary="Example second filter",
                         )
                     ],
                     "next_page": None,
@@ -63,6 +65,24 @@ async def test_native_todo_follows_the_entire_inventory(
         "second-filter",
     }
     assert hass.states.get("todo.maintenance").state == "2"
+    calendar = await hass.services.async_call(
+        "calendar",
+        "get_events",
+        {
+            "entity_id": "calendar.maintenance",
+            "start_date_time": "2026-10-15T00:00:00Z",
+            "end_date_time": "2026-10-17T00:00:00Z",
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert {
+        event["summary"] for event in calendar["calendar.maintenance"]["events"]
+    } == {
+        "Replace filter",
+        "Example second filter",
+    }
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -70,6 +90,7 @@ async def test_native_todo_follows_the_entire_inventory(
     [
         {"items": [item_record(), item_record()], "next_page": None},
         {"items": [{**item_record(), "revision": True}], "next_page": None},
+        {"items": [item_record(due="9999-12-31")], "next_page": None},
         {"items": [item_record()], "next_page": "repeated-cursor"},
         {"items": [], "next_page": False},
         {
@@ -80,6 +101,7 @@ async def test_native_todo_follows_the_entire_inventory(
     ids=[
         "duplicate-id",
         "invalid-revision",
+        "unrepresentable-calendar-end",
         "cursor-loop",
         "invalid-cursor",
         "duplicate-uid",
@@ -95,6 +117,7 @@ async def test_invalid_page_preserves_previous_snapshot_and_marks_unavailable(
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
     assert hass.states.get("todo.maintenance").state == "unavailable"
+    assert hass.states.get("calendar.maintenance").state == "unavailable"
 
 
 async def test_partial_inventory_auth_failure_requests_reauthentication(

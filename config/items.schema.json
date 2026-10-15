@@ -179,7 +179,8 @@
         },
         "due": {
           "type": "string",
-          "format": "date"
+          "format": "date",
+          "description": "Due date between 0001-01-01 and 9999-12-30 inclusive. The following day must be representable as the exclusive end of an all-day calendar event."
         },
         "schedule": {
           "$ref": "#/$defs/schedule"

@@ -80,7 +80,7 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
                 summary=item.summary,
                 status=TodoItemStatus.NEEDS_ACTION,
                 due=item.due,
-                description=item.todo_description,
+                description=item.task_description,
             )
             for item in self.coordinator.data.items
             if not item.archived
@@ -109,7 +109,7 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             or (item.due is not None and item.due != current.due)
             or (
                 item.description is not None
-                and item.description != current.todo_description
+                and item.description != current.task_description
             )
         ):
             raise ServiceValidationError(

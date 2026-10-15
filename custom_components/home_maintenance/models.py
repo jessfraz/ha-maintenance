@@ -98,6 +98,7 @@ class MaintenanceItem:
     name: str
     summary: str
     description: str | None
+    location: str | None
     revision: int
     archived: bool
     occurrence_id: UUID
@@ -106,7 +107,7 @@ class MaintenanceItem:
     checklist: tuple[ChecklistStep, ...]
 
     @property
-    def todo_description(self) -> str | None:
+    def task_description(self) -> str | None:
         """Keep detailed notes and readable step progress on the parent task."""
         sections: list[str] = []
         if self.description:
@@ -139,6 +140,7 @@ class MaintenanceItem:
         name = value.get("name")
         summary = value.get("summary")
         description = value.get("description")
+        location = value.get("location")
         revision = value.get("revision")
         archived = value.get("archived")
         occurrence = value.get("occurrence")
@@ -151,6 +153,7 @@ class MaintenanceItem:
             or not isinstance(summary, str)
             or not summary.strip()
             or (description is not None and not isinstance(description, str))
+            or (location is not None and not isinstance(location, str))
             or type(revision) is not int
             or revision < 1
             or type(archived) is not bool
@@ -170,13 +173,15 @@ class MaintenanceItem:
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("Duplicate occurrence checklist step")
         due_date = date.fromisoformat(due)
-        if due_date.isoformat() != due:
+        # All-day calendar events need a following date for their exclusive end.
+        if due_date.isoformat() != due or due_date == date.max:
             raise ValueError("Invalid occurrence date")
         return cls(
             item_id,
             name,
             summary,
             description,
+            location,
             revision,
             archived,
             UUID(occurrence_id),

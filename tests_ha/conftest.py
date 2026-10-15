@@ -31,6 +31,9 @@ def item_record(
     revision: int = 1,
     summary: str = "Replace filter",
     description: str | None = None,
+    location: str | None = None,
+    due: str = "2026-10-15",
+    archived: bool = False,
     checklist: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """A synthetic public-contract task unrelated to any household data."""
@@ -43,7 +46,7 @@ def item_record(
             {"id": step["id"], "summary": step["summary"]} for step in checklist or []
         ],
         "timezone": "UTC",
-        "location": None,
+        "location": location,
         "group": None,
         "schedule": {"days": 0, "months": 3, "years": 0},
         "instructions": ["Turn off the appliance", "Replace the filter"],
@@ -51,10 +54,10 @@ def item_record(
         "resources": [],
         "reorder_url": None,
         "revision": revision,
-        "archived": False,
+        "archived": archived,
         "occurrence": {
             "id": occurrence_id,
-            "due": "2026-10-15",
+            "due": due,
             "checklist": checklist or [],
         },
         "last_completion": None,

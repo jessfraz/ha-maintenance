@@ -108,7 +108,7 @@ impl Schedule {
     pub fn next(self, from: NaiveDate) -> Result<NaiveDate, Error> {
         from.checked_add_months(Months::new(self.years * 12 + self.months))
             .and_then(|date| date.checked_add_days(Days::new(u64::from(self.days))))
-            .filter(|date| date.year() <= 9999)
+            .filter(|date| validate_date(*date).is_ok())
             .ok_or(Error::Invalid(
                 "next due date is outside the supported calendar",
             ))
@@ -261,9 +261,10 @@ fn url(value: &str) -> Result<(), Error> {
     Ok(())
 }
 pub fn validate_date(date: NaiveDate) -> Result<(), Error> {
-    if !(1..=9999).contains(&date.year()) {
+    // An all-day calendar event also needs a representable exclusive end date.
+    if date.year() < 1 || date.succ_opt().is_none_or(|end| end.year() > 9999) {
         return Err(Error::Invalid(
-            "due date must have a year between 0001 and 9999",
+            "due date must be between 0001-01-01 and 9999-12-30",
         ));
     }
     Ok(())
@@ -480,6 +481,18 @@ mod tests {
         assert!(
             yearly
                 .next(NaiveDate::from_ymd_opt(9999, 1, 1).unwrap())
+                .is_err()
+        );
+        let daily = Schedule::new(1, 0, 0).unwrap();
+        assert_eq!(
+            daily
+                .next(NaiveDate::from_ymd_opt(9999, 12, 29).unwrap())
+                .unwrap(),
+            NaiveDate::from_ymd_opt(9999, 12, 30).unwrap()
+        );
+        assert!(
+            daily
+                .next(NaiveDate::from_ymd_opt(9999, 12, 30).unwrap())
                 .is_err()
         );
     }

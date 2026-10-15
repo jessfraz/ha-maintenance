@@ -4,7 +4,7 @@ Install both parts:
 
 - The **Maintenance app** runs the Rust service, SQLite database, and dashboard.
 - The **Maintenance integration**, installed through HACS, adds sensors,
-  actions, and a native to-do entity.
+  actions, a native to-do entity, and a calendar.
 
 Use `https://github.com/jessfraz/ha-maintenance` for both repositories.
 
@@ -77,6 +77,25 @@ API clients change a step with
 `occurrence_id` and `completed` boolean. Supply the item's ETag in `If-Match`
 and a stable `Idempotency-Key`, as for completing an occurrence. A stale
 occurrence or revision is rejected rather than applying the change to new work.
+
+## Calendar
+
+Select `calendar.maintenance` in a Home Assistant calendar card or calendar
+automation. It shows active tasks as all-day events on their current due date,
+with the action summary, description, instructions, checklist progress, and
+location. Ordinary authenticated users can read the calendar.
+
+Dates use Home Assistant's local calendar day. Overdue work keeps its original
+date; use the to-do list or overdue sensor to track unfinished tasks. Archiving
+an item removes its event. Completing it replaces the event with the next
+occurrence calculated by the service, with a new event UID and reset checklist.
+Future occurrences are not projected in advance because their dates depend on
+when the work is completed.
+
+The calendar is read-only. Complete tasks through the to-do list, dashboard,
+or integration actions; edit definitions in the dashboard. It uses the shared
+60-second poll and refreshes after integration actions. A service outage marks
+the calendar unavailable instead of returning stale events as current data.
 
 ## NFC tags
 
