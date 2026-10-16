@@ -194,6 +194,7 @@ async def test_current_event_advances_at_local_midnight(
         assert state.attributes.get("message") == message
 
 
+@pytest.mark.freeze_time("2026-10-15T12:00:00Z")
 async def test_calendar_subscription_updates_when_a_later_task_changes(
     hass: HomeAssistant, hass_ws_client, entry, backend: Backend
 ) -> None:
