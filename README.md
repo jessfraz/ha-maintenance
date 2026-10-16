@@ -80,6 +80,9 @@ OpenAPI document with `just openapi`.
 | Read or update an item | `GET /v1/items/{id}`, `PATCH /v1/items/{id}` |
 | Check or uncheck a current step | `PUT /v1/items/{id}/checklist/{step_id}` |
 | Complete the current occurrence | `POST /v1/items/{id}/completions` |
+| Request a reorder | `POST /v1/items/{id}/reorders` |
+| Read reorder requests | `GET /v1/reorders`, `GET /v1/reorders/{id}` |
+| Fulfill or dismiss a reorder | `PUT /v1/reorders/{id}/resolution` |
 | Read completion history | `GET /v1/items/{id}/events` |
 | Archive or restore an item | `PUT /v1/items/{id}/archive`, `DELETE /v1/items/{id}/archive` |
 | Counts and authenticated service status | `GET /v1/summary`, `GET /v1/system` |
@@ -104,6 +107,42 @@ fit within 200 UTF-8 bytes. An optional description fits within 16,000 UTF-8
 bytes and must be nonblank when supplied. A checklist defaults to empty and
 supports up to 100 steps, each with a unique UUID that remains stable when
 editing its text.
+
+### Reorder requests
+
+`POST /v1/items/{id}/reorders` accepts only `{}`. Send the captured item ETag
+in `If-Match` and a unique `Idempotency-Key` for each deliberate press. An
+integration client also sends `X-Maintenance-System-Actor: ha:integration`
+with its integration bearer credential. Home Assistant clients use
+`/api/home_maintenance/v1` with HA authentication; the bridge derives the actor
+from the authenticated user.
+
+The service returns **201 Created** after atomically saving the request and its
+receipt in SQLite. The receipt contains `id` (UUID), `item_id`, `item_revision`,
+`requested_at` (UTC), `actor`, and an `item` snapshot with `name`, `summary`,
+`description`, `specs`, `resources`, and the required `reorder_url`. All content
+comes from the stored item. A reorder neither completes nor reschedules work,
+and the service does not fetch vendor URLs or make purchases.
+
+Keep the same key, body, item ID, and captured revision when retrying an
+uncertain response. The original **201** receipt replays before checking the
+current item, including after edits, archival, source deletion, fulfillment,
+or dismissal. Keys are scoped to the authenticated actor and shared across
+operations; reusing one for a different request returns **409 Conflict**.
+Different keys create distinct requests. A new request needs an active item
+with a reorder URL (**409** otherwise), the current revision (**412** if stale),
+and a present `If-Match` (**428** if omitted). A missing source item returns
+**404**. Invalid bodies, keys, and revision headers return **400**.
+
+`GET /v1/reorders` defaults to `status=pending`; it also accepts `fulfilled` or
+`dismissed`, `limit` (1–200, default 100), and an opaque `page_token`. Each record
+contains the immutable `request` receipt alongside `status`, `revision`,
+`resolved_at`, and `resolved_by`. `GET /v1/reorders/{id}` returns that current
+record and its ETag. Administrators resolve a pending request with
+`PUT /v1/reorders/{id}/resolution`, the record's `If-Match`, and
+`{"status":"fulfilled"}` or `{"status":"dismissed"}`. Resolution is terminal;
+neither action deletes the request or its replay receipt. Reorder responses
+use `Cache-Control: no-store`.
 
 ## Development
 

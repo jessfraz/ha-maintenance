@@ -1,5 +1,5 @@
 name: Maintenance
-version: "0.1.1"
+version: "0.2.0"
 slug: home_maintenance
 description: Local maintenance schedules, completion history, and Home Assistant tasks
 url: https://github.com/jessfraz/ha-maintenance

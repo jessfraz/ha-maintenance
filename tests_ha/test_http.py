@@ -16,6 +16,7 @@ from custom_components.home_maintenance.const import (
 from .conftest import ITEM_ID, OCCURRENCE_ID, Backend
 
 PREFIX = "/api/home_maintenance/v1"
+REORDER_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6182"
 
 
 async def test_authentication_and_human_attribution(
@@ -62,9 +63,10 @@ async def test_authentication_and_human_attribution(
         ("patch", f"items/{ITEM_ID}"),
         ("put", f"items/{ITEM_ID}/archive"),
         ("delete", f"items/{ITEM_ID}/archive"),
+        ("put", f"reorders/{REORDER_ID}/resolution"),
     ],
 )
-async def test_only_admin_can_change_definitions(
+async def test_only_admin_can_change_definitions_or_resolve_reorders(
     hass_client: ClientSessionGenerator,
     hass_user_token: str,
     hass_admin_user: MockUser,
@@ -100,6 +102,13 @@ async def test_only_admin_can_change_definitions(
         ("get", "items?url=http://elsewhere.invalid", 400),
         ("get", "summary?archived=true", 400),
         ("get", f"items/{ITEM_ID}?limit=20", 400),
+        ("get", f"items/{ITEM_ID}/reorders", 405),
+        ("post", "reorders", 405),
+        ("delete", f"reorders/{REORDER_ID}", 405),
+        ("get", "reorders/not-a-uuid", 404),
+        ("get", "reorders?url=http://elsewhere.invalid", 400),
+        ("get", f"reorders/{REORDER_ID}?status=pending", 400),
+        ("put", f"reorders/{REORDER_ID}/resolution?status=fulfilled", 400),
     ],
 )
 async def test_route_and_query_allowlist(
@@ -153,6 +162,57 @@ async def test_query_response_headers_and_unload(
     count = len(backend.requests)
     assert (await client.get(f"{PREFIX}/items")).status == 503
     assert len(backend.requests) == count
+
+
+async def test_reorder_attribution_receipt_and_list_query(
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    receipt = {"id": REORDER_ID}
+    backend.responses[("POST", f"/v1/items/{ITEM_ID}/reorders")] = (
+        201,
+        json.dumps(receipt).encode(),
+        {"Content-Type": "application/json", "Cache-Control": "no-store"},
+    )
+    client = await hass_client(hass_user_token)
+    response = await client.post(
+        f"{PREFIX}/items/{ITEM_ID}/reorders",
+        json={},
+        headers={
+            "If-Match": '"1"',
+            "Idempotency-Key": "press-one",
+            "X-Maintenance-Actor-Id": "forged-user",
+            "X-Maintenance-Admin": "true",
+            "X-Maintenance-System-Actor": "ha:integration",
+        },
+    )
+    assert response.status == 201
+    assert response.headers["Cache-Control"] == "no-store"
+    assert await response.json() == receipt
+    forwarded = backend.requests[-1]
+    assert forwarded.path == f"/v1/items/{ITEM_ID}/reorders"
+    assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_user.id}"
+    assert "X-Maintenance-Admin" not in forwarded.headers
+    assert "X-Maintenance-System-Actor" not in forwarded.headers
+    assert forwarded.headers["If-Match"] == '"1"'
+    assert forwarded.headers["Idempotency-Key"] == "press-one"
+    assert json.loads(forwarded.body) == {}
+
+    response = await client.get(
+        f"{PREFIX}/reorders?status=dismissed&limit=2&page_token=a%2Bb"
+    )
+    assert response.status == 200
+    assert backend.requests[-1].query == {
+        "status": "dismissed",
+        "limit": "2",
+        "page_token": "a+b",
+    }
+    response = await client.get(f"{PREFIX}/reorders/{REORDER_ID}")
+    assert response.status == 200
+    assert backend.requests[-1].path == f"/v1/reorders/{REORDER_ID}"
 
 
 async def test_body_and_response_limits(

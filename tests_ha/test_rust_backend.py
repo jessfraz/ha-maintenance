@@ -288,6 +288,109 @@ async def test_ha_to_rust_maintenance_contract(
     assert state.state == "2"
 
 
+async def test_reorder_receipt_survives_resolution_and_item_changes(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_user: MockUser,
+    hass_user_token: str,
+    rust_backend: RustBackend,
+) -> None:
+    """HA derives identity; Rust retains a frozen request without completing work."""
+    configured = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"], {"next_step_id": "standalone"}
+    )
+    configured = await hass.config_entries.flow.async_configure(
+        configured["flow_id"],
+        {
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    assert configured["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    entry = configured["result"]
+    admin = await hass_client()
+    user = await hass_client(hass_user_token)
+    created = await admin.post(
+        f"{PREFIX}/items",
+        json={
+            "id": "replace-filter",
+            "name": "Example filter",
+            "summary": "Replace the example filter",
+            "timezone": "UTC",
+            "due": "2025-01-01",
+            "schedule": {"days": 0, "months": 3, "years": 0},
+            "reorder_url": "https://example.com/filter",
+            "specs": [{"label": "Size", "value": "Example size"}],
+        },
+        headers={"Idempotency-Key": "create-reorder-item"},
+    )
+    assert created.status == 201
+    original = MaintenanceItem.parse(await created.json())
+    headers = {"If-Match": created.headers["ETag"], "Idempotency-Key": "press-one"}
+    requested = await user.post(
+        f"{PREFIX}/items/{original.id}/reorders", json={}, headers=headers
+    )
+    assert requested.status == 201
+    assert requested.headers["Cache-Control"] == "no-store"
+    receipt = await requested.json()
+    assert receipt["item_id"] == original.id
+    assert receipt["item_revision"] == original.revision
+    assert receipt["item"]["name"] == original.name
+    assert receipt["item"]["reorder_url"] == "https://example.com/filter"
+    assert receipt["item"]["specs"] == [{"label": "Size", "value": "Example size"}]
+    assert receipt["actor"] == {
+        "kind": "user",
+        "id": f"ha:{hass_user.id}",
+        "name": hass_user.name,
+    }
+    await entry.runtime_data.async_refresh()
+    assert entry.runtime_data.data.summary["completed"] == 0
+    current = await user.get(f"{PREFIX}/items/{original.id}")
+    assert MaintenanceItem.parse(await current.json()) == original
+
+    pending = await (await user.get(f"{PREFIX}/reorders")).json()
+    assert len(pending["items"]) == 1
+    assert pending["items"][0]["request"] == receipt
+    request_path = f"{PREFIX}/reorders/{receipt['id']}"
+    record = await user.get(request_path)
+    assert record.status == 200
+    resolution_headers = {"If-Match": record.headers["ETag"]}
+    assert (
+        await user.put(
+            f"{request_path}/resolution",
+            json={"status": "fulfilled"},
+            headers=resolution_headers,
+        )
+    ).status == 403
+    resolved = await admin.put(
+        f"{request_path}/resolution",
+        json={"status": "fulfilled"},
+        headers=resolution_headers,
+    )
+    assert resolved.status == 200
+    resolved_record = await resolved.json()
+    assert resolved_record["status"] == "fulfilled"
+    assert resolved_record["request"] == receipt
+    assert (await (await user.get(f"{PREFIX}/reorders")).json())["items"] == []
+    fulfilled = await (await user.get(f"{PREFIX}/reorders?status=fulfilled")).json()
+    assert fulfilled["items"] == [resolved_record]
+    archived = await admin.put(
+        f"{PREFIX}/items/{original.id}/archive",
+        headers={"If-Match": headers["If-Match"]},
+    )
+    assert archived.status == 200
+    replay = await user.post(
+        f"{PREFIX}/items/{original.id}/reorders", json={}, headers=headers
+    )
+    assert replay.status == 201
+    assert await replay.json() == receipt
+    assert await (await user.get(request_path)).json() == resolved_record
+
+
 @pytest.mark.parametrize("rust_backend", [True], indirect=True, ids=["app"])
 async def test_generated_pairing_reaches_loaded_and_reports_presence(
     hass: HomeAssistant, rust_backend: RustBackend

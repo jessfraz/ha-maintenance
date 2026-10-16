@@ -220,6 +220,28 @@ check_item() {
     check_item_contract persisted
     request GET /v1/items/example-filter/events 200 --header "Authorization: Bearer $token"
     check_item_contract history
+    check_reorder
+}
+
+check_reorder() {
+    # Replaying the accepted press must keep its immutable acknowledgement,
+    # including after resolution and later changes to the source task.
+    request POST /v1/items/example-filter/reorders 201 \
+        --header "Authorization: Bearer $integration_token" \
+        --header 'X-Maintenance-System-Actor: ha:integration' \
+        --header 'Content-Type: application/json' \
+        --header 'Idempotency-Key: smoke-reorder-filter' \
+        --header "If-Match: $reorder_revision" --data '{}'
+    cmp --silent "$scratch/reorder-receipt.json" "$scratch/response.json"
+    request GET "/v1/reorders/$reorder_id" 200 \
+        --header "Authorization: Bearer $integration_token"
+    cmp --silent "$scratch/resolved-reorder.json" "$scratch/response.json"
+    request GET /v1/reorders 200 --header "Authorization: Bearer $integration_token"
+    jq --exit-status '.items == [] and .next_page == null' "$scratch/response.json" >/dev/null
+    request GET '/v1/reorders?status=fulfilled&limit=1' 200 \
+        --header "Authorization: Bearer $integration_token"
+    jq --exit-status --slurpfile expected "$scratch/resolved-reorder.json" \
+        '.items == $expected and .next_page == null' "$scratch/response.json" >/dev/null
 }
 
 check_credentials() {
@@ -259,9 +281,45 @@ request POST /v1/items 201 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: smoke-create-filter' \
-    --data "{\"id\":\"example-filter\",\"name\":\"Example filter\",\"summary\":\"Replace the example filter\",\"description\":\"Example task with a partial checklist.\",\"timezone\":\"Etc/UTC\",\"due\":\"2031-02-17\",\"schedule\":{\"days\":47,\"months\":0,\"years\":0},\"checklist\":[{\"id\":\"$step_id\",\"summary\":\"Inspect the example filter\"},{\"id\":\"$other_step_id\",\"summary\":\"Fit the example replacement\"}]}"
+    --data "{\"id\":\"example-filter\",\"name\":\"Example filter\",\"summary\":\"Replace the example filter\",\"description\":\"Example task with a partial checklist.\",\"timezone\":\"Etc/UTC\",\"due\":\"2031-02-17\",\"schedule\":{\"days\":47,\"months\":0,\"years\":0},\"checklist\":[{\"id\":\"$step_id\",\"summary\":\"Inspect the example filter\"},{\"id\":\"$other_step_id\",\"summary\":\"Fit the example replacement\"}],\"reorder_url\":\"https://example.com/filter\"}"
 occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
 check_item_contract fresh
+reorder_revision=$(etag)
+cp "$scratch/response.json" "$scratch/reorder-source.json"
+request POST /v1/items/example-filter/reorders 201 \
+    --header "Authorization: Bearer $integration_token" \
+    --header 'X-Maintenance-System-Actor: ha:integration' \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-reorder-filter' \
+    --header "If-Match: $reorder_revision" --data '{}'
+cp "$scratch/response.json" "$scratch/reorder-receipt.json"
+reorder_id=$(jq --exit-status --raw-output '.id' "$scratch/response.json")
+jq --exit-status --slurpfile source "$scratch/reorder-source.json" \
+    '.item_id == $source[0].id and .item_revision == $source[0].revision
+     and .actor == {kind:"system",id:"ha:integration",name:"Home Assistant integration"}
+     and .item == ($source[0] | {name,summary,description,specs,resources,reorder_url})
+     and (.requested_at | type == "string" and length > 0)' "$scratch/response.json" >/dev/null
+# A reorder must not complete, reschedule, or otherwise mutate its source task.
+request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
+cmp --silent "$scratch/reorder-source.json" "$scratch/response.json"
+test "$(etag)" = "$reorder_revision"
+request GET "/v1/reorders/$reorder_id" 200 --header "Authorization: Bearer $token"
+reorder_resolution_revision=$(etag)
+jq --exit-status --slurpfile receipt "$scratch/reorder-receipt.json" \
+    '.request == $receipt[0] and .status == "pending" and .revision == 1
+     and .resolved_at == null and .resolved_by == null' "$scratch/response.json" >/dev/null
+request PUT "/v1/reorders/$reorder_id/resolution" 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header "If-Match: $reorder_resolution_revision" --data '{"status":"fulfilled"}'
+jq --exit-status --slurpfile receipt "$scratch/reorder-receipt.json" \
+    '.request == $receipt[0] and .status == "fulfilled" and .revision == 2
+     and (.resolved_at | type == "string" and length > 0)
+     and .resolved_by.kind == "system" and .resolved_by.id == "owner"' "$scratch/response.json" >/dev/null
+cp "$scratch/response.json" "$scratch/resolved-reorder.json"
+check_reorder
+request GET /v1/items/example-filter 200 --header "Authorization: Bearer $token"
+cmp --silent "$scratch/reorder-source.json" "$scratch/response.json"
 step_revision=$(etag)
 step_body=$(jq --compact-output --null-input --arg occurrence "$occurrence" '{occurrence_id:$occurrence,completed:true}')
 # An ordinary authenticated Home Assistant user can check a step without
@@ -406,4 +464,4 @@ request GET /v1/items/example-filter/events 200 --header "Authorization: Bearer 
 check_item_contract history
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, partial checklists/history/reset, durable retries, restart, and cold backup/restore."
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, partial checklists/history/reset, durable reorder receipts/resolution/retries, restart, and cold backup/restore."

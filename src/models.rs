@@ -115,13 +115,13 @@ impl Schedule {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
     pub label: String,
     pub value: String,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Resource {
     pub label: String,
@@ -432,6 +432,101 @@ pub struct Item {
 #[serde(deny_unknown_fields)]
 pub struct CompleteItem {
     pub occurrence_id: Uuid,
+}
+
+/// The server freezes trusted item content; callers supply no purchase details.
+#[derive(Clone, Debug, Default, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReorderItem {}
+impl<'de> Deserialize<'de> for ReorderItem {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct EmptyObject;
+        impl<'de> serde::de::Visitor<'de> for EmptyObject {
+            type Value = ReorderItem;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an empty JSON object")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                if let Some(key) = map.next_key::<String>()? {
+                    return Err(serde::de::Error::unknown_field(&key, &[]));
+                }
+                Ok(ReorderItem {})
+            }
+        }
+        deserializer.deserialize_map(EmptyObject)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReorderContent {
+    pub name: String,
+    pub summary: String,
+    pub description: Option<String>,
+    pub specs: Vec<Spec>,
+    pub resources: Vec<Resource>,
+    pub reorder_url: String,
+}
+
+/// An immutable acknowledgement, retained independently of the source task.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReorderReceipt {
+    pub id: Uuid,
+    pub item_id: ItemId,
+    pub item_revision: i64,
+    pub requested_at: DateTime<Utc>,
+    pub actor: Actor,
+    pub item: ReorderContent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReorderStatus {
+    #[default]
+    Pending,
+    Fulfilled,
+    Dismissed,
+}
+impl ReorderStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Fulfilled => "fulfilled",
+            Self::Dismissed => "dismissed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReorderResolution {
+    Fulfilled,
+    Dismissed,
+}
+impl From<ReorderResolution> for ReorderStatus {
+    fn from(value: ReorderResolution) -> Self {
+        match value {
+            ReorderResolution::Fulfilled => Self::Fulfilled,
+            ReorderResolution::Dismissed => Self::Dismissed,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveReorder {
+    pub status: ReorderResolution,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Reorder {
+    pub request: ReorderReceipt,
+    pub status: ReorderStatus,
+    pub revision: i64,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_by: Option<Actor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

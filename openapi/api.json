@@ -486,6 +486,24 @@
         ],
         "type": "object"
       },
+      "Page_for_Reorder": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Reorder"
+            },
+            "type": "array"
+          },
+          "next_page": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "type": "object"
+      },
       "PresenceReport": {
         "additionalProperties": false,
         "properties": {
@@ -499,6 +517,143 @@
         "required": [
           "backup",
           "version"
+        ],
+        "type": "object"
+      },
+      "Reorder": {
+        "properties": {
+          "request": {
+            "$ref": "#/components/schemas/ReorderReceipt"
+          },
+          "resolved_at": {
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "resolved_by": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Actor"
+              }
+            ],
+            "nullable": true
+          },
+          "revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ReorderStatus"
+          }
+        },
+        "required": [
+          "request",
+          "revision",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ReorderContent": {
+        "properties": {
+          "description": {
+            "nullable": true,
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reorder_url": {
+            "type": "string"
+          },
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/Resource"
+            },
+            "type": "array"
+          },
+          "specs": {
+            "items": {
+              "$ref": "#/components/schemas/Spec"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "reorder_url",
+          "resources",
+          "specs",
+          "summary"
+        ],
+        "type": "object"
+      },
+      "ReorderItem": {
+        "additionalProperties": false,
+        "description": "The server freezes trusted item content; callers supply no purchase details.",
+        "type": "object"
+      },
+      "ReorderReceipt": {
+        "description": "An immutable acknowledgement, retained independently of the source task.",
+        "properties": {
+          "actor": {
+            "$ref": "#/components/schemas/Actor"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "item": {
+            "$ref": "#/components/schemas/ReorderContent"
+          },
+          "item_id": {
+            "$ref": "#/components/schemas/ItemId"
+          },
+          "item_revision": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor",
+          "id",
+          "item",
+          "item_id",
+          "item_revision",
+          "requested_at"
+        ],
+        "type": "object"
+      },
+      "ReorderResolution": {
+        "enum": [
+          "fulfilled",
+          "dismissed"
+        ],
+        "type": "string"
+      },
+      "ReorderStatus": {
+        "enum": [
+          "pending",
+          "fulfilled",
+          "dismissed"
+        ],
+        "type": "string"
+      },
+      "ResolveReorder": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/ReorderResolution"
+          }
+        },
+        "required": [
+          "status"
         ],
         "type": "object"
       },
@@ -750,9 +905,9 @@
     }
   },
   "info": {
-    "description": "Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates, completions and checklist changes require Idempotency-Key; item mutations require the current quoted If-Match revision.",
+    "description": "Local maintenance definitions, recurring occurrences, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.",
     "title": "Maintenance API",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "openapi": "3.0.3",
   "paths": {
@@ -1556,6 +1711,244 @@
         ]
       }
     },
+    "/v1/items/{id}/reorders": {
+      "post": {
+        "description": "Exact retries return the original receipt, even after source or request changes.",
+        "operationId": "item_reorder",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ItemId"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReorderItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReorderReceipt"
+                }
+              }
+            },
+            "description": "successful creation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Persist a reorder request and immutable acknowledgement without purchasing anything.",
+        "tags": [
+          "reorders"
+        ]
+      }
+    },
+    "/v1/reorders": {
+      "get": {
+        "operationId": "reorders_list",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "format": "uint32",
+              "minimum": 0,
+              "nullable": true,
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page_token",
+            "schema": {
+              "nullable": true,
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "$ref": "#/components/schemas/ReorderStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_for_Reorder"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List requests in stable creation order with a status-scoped cursor.",
+        "tags": [
+          "reorders"
+        ]
+      }
+    },
+    "/v1/reorders/{id}": {
+      "get": {
+        "operationId": "reorder_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reorder"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "reorders"
+        ]
+      }
+    },
+    "/v1/reorders/{id}/resolution": {
+      "put": {
+        "description": "Repeating the same status with the current ETag is a no-op; a stale ETag is 412.",
+        "operationId": "reorder_resolve",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveReorder"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reorder"
+                }
+              }
+            },
+            "description": "successful operation",
+            "headers": {
+              "cache-control": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              },
+              "etag": {
+                "required": true,
+                "schema": {
+                  "type": "string"
+                },
+                "style": "simple"
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Resolve a pending request. Terminal records and their receipts are retained.",
+        "tags": [
+          "reorders"
+        ]
+      }
+    },
     "/v1/summary": {
       "get": {
         "operationId": "summary",
@@ -1630,6 +2023,9 @@
   "tags": [
     {
       "name": "items"
+    },
+    {
+      "name": "reorders"
     },
     {
       "name": "system"
