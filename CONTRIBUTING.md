@@ -19,13 +19,6 @@ values; keep that property when improving the scanner. See [SECURITY.md](SECURIT
 
 Keep version numbers consistent across Cargo, Python, the integration manifest,
 and app configuration. `scripts/check-release-version vVERSION` checks a
-release tag before publishing. Dependabot maintains weekly grouped Cargo, uv,
-Docker, and Actions updates. Actions are pinned by commit SHA.
-
-While this personal repository is private, GitHub does not support
-[CodeQL](https://docs.github.com/en/code-security/concepts/code-scanning/codeql/codeql-code-scanning)
-or [Nix Dependabot updates](https://docs.github.com/en/code-security/reference/supply-chain-security/supported-ecosystems-and-repositories#nix).
-Dependency auditing and privacy checks still run. CodeQL runs when the repository
-becomes public and on subsequent pushes, pull requests, and weekly scans.
-Update flake inputs with `nix flake update` while private. After publication,
-add a weekly `nix` entry for `/` to `.github/dependabot.yml`.
+release tag before publishing. Dependabot maintains weekly Cargo, uv, Docker,
+Actions, and Nix updates. Actions are pinned by commit SHA. CodeQL and dependency
+auditing run on pushes, pull requests, and weekly scans.
