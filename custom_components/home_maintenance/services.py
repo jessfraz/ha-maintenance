@@ -10,6 +10,7 @@ from homeassistant.core import (
     Context,
     HomeAssistant,
     ServiceCall,
+    ServiceResponse,
     SupportsResponse,
 )
 from homeassistant.exceptions import (
@@ -171,7 +172,7 @@ def async_register_services(hass: HomeAssistant) -> None:
 
     async def handle(
         call: ServiceCall,
-    ) -> CompletionResult | ChecklistStepResult | None:
+    ) -> ServiceResponse:
         actor = await async_actor(hass, call.context)
         coordinator = loaded_coordinator(hass)
         if coordinator is None:
@@ -222,12 +223,13 @@ def async_register_services(hass: HomeAssistant) -> None:
                     raise HomeAssistantError(
                         "The backend omitted the updated checklist step"
                     )
-                return ChecklistStepResult(
+                step_result = ChecklistStepResult(
                     **result,
                     step_id=str(step.id),
                     completed=step.completion is not None,
                 )
-            return result
+                return {**step_result}
+            return {**result}
         return None
 
     hass.services.async_register(

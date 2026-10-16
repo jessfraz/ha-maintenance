@@ -72,9 +72,10 @@ class MaintenanceView(HomeAssistantView):
         coordinator = loaded_coordinator(self._hass)
         if coordinator is None:
             raise web.HTTPServiceUnavailable
-        if (request.content_length or 0) > MAX_REQUEST_BYTES:
+        content_length = request.content_length or 0
+        if content_length > MAX_REQUEST_BYTES:
             raise web.HTTPRequestEntityTooLarge(
-                max_size=MAX_REQUEST_BYTES, actual_size=request.content_length
+                max_size=MAX_REQUEST_BYTES, actual_size=content_length
             )
         payload = bytearray()
         async for chunk in request.content.iter_chunked(16 * 1024):

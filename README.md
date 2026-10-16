@@ -118,7 +118,7 @@ just container
 ```
 
 `just check` runs privacy and version checks, formatting, strict Clippy, Rust
-tests, and Home Assistant tests against the actual compiled Rust service.
+tests, Ruff, ty, and Home Assistant tests against the actual compiled Rust service.
 `just container` builds and tests the native image, authentication, process
 ownership, persisted credentials and checklists, completion history,
 recurrence, restart, and a cold-volume backup/restore. CI runs the container

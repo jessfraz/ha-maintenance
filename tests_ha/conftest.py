@@ -7,9 +7,13 @@ from dataclasses import dataclass, field
 import pytest
 from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
-from homeassistant.core import HomeAssistant
+from homeassistant.auth.providers import AuthProvider
+from homeassistant.core import HomeAssistant, ServiceResponse
+from homeassistant.util.json import JsonObjectType
+from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -22,6 +26,22 @@ OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e"
 NEXT_OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617f"
 STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6180"
 SECOND_STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6181"
+
+
+def entity_items(
+    response: ServiceResponse, entity_id: str, collection: str = "items"
+) -> list[JsonObjectType]:
+    """Assert the shape of a native entity service's returned collection."""
+    assert response is not None
+    entity = response[entity_id]
+    assert isinstance(entity, dict)
+    items = entity[collection]
+    assert isinstance(items, list)
+    records: list[JsonObjectType] = []
+    for item in items:
+        assert isinstance(item, dict)
+        records.append(item)
+    return records
 
 
 def item_record(
@@ -112,14 +132,15 @@ class Backend:
 
 
 @pytest.fixture(autouse=True)
-def custom_integrations(enable_custom_integrations) -> None:
+def custom_integrations(enable_custom_integrations: None) -> None:
     """Enable the integration from this checkout."""
 
 
 @pytest.fixture
-async def hass_user(hass: HomeAssistant, local_auth) -> MockUser:
+async def hass_user(hass: HomeAssistant, local_auth: AuthProvider) -> MockUser:
     """An authenticated user without administrator privileges."""
     group = await hass.auth.async_get_group(GROUP_ID_USER)
+    assert group is not None
     return MockUser(groups=[group]).add_to_hass(hass)
 
 
@@ -132,7 +153,9 @@ async def hass_user_token(hass: HomeAssistant, hass_user: MockUser) -> str:
 
 
 @pytest.fixture
-async def backend(aiohttp_server, socket_enabled) -> AsyncIterator[Backend]:
+async def backend(
+    aiohttp_server: AiohttpServer, socket_enabled: None
+) -> AsyncIterator[Backend]:
     upstream = Backend()
     app = web.Application()
     app.router.add_route("*", "/{path:.*}", upstream.handle)
@@ -142,7 +165,7 @@ async def backend(aiohttp_server, socket_enabled) -> AsyncIterator[Backend]:
 
 
 @pytest.fixture
-async def entry(hass: HomeAssistant, backend: Backend) -> MockConfigEntry:
+async def entry(hass: HomeAssistant, backend: Backend) -> MaintenanceConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
         data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "test-integration-token"},

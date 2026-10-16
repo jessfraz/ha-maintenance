@@ -16,6 +16,9 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
+from homeassistant.util.json import JsonObjectType
+from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.home_maintenance.const import (
     CONF_ADDON_SLUG,
@@ -30,7 +33,7 @@ from custom_components.home_maintenance.models import (
     MaintenanceItem,
 )
 
-from .conftest import SECOND_STEP_ID, STEP_ID
+from .conftest import SECOND_STEP_ID, STEP_ID, entity_items
 
 PREFIX = "/api/home_maintenance/v1"
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
@@ -52,7 +55,7 @@ async def rust_backend(
     tmp_path: Path,
     unused_tcp_port: int,
     request: pytest.FixtureRequest,
-    socket_enabled,
+    socket_enabled: None,
 ) -> AsyncIterator[RustBackend]:
     """Launch the actual binary against disposable SQLite and private options."""
     binary = Path(
@@ -143,8 +146,8 @@ async def rust_backend(
 
 async def test_ha_to_rust_maintenance_contract(
     hass: HomeAssistant,
-    hass_client,
-    hass_user,
+    hass_client: ClientSessionGenerator,
+    hass_user: MockUser,
     hass_user_token: str,
     rust_backend: RustBackend,
 ) -> None:
@@ -187,8 +190,10 @@ async def test_ha_to_rust_maintenance_contract(
     first = await created.json()
     initial_etag = created.headers["ETag"]
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("todo.maintenance").state == "1"
-    assert hass.states.get("sensor.maintenance_overdue").state == "1"
+    for entity_id in ("todo.maintenance", "sensor.maintenance_overdue"):
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert state.state == "1"
 
     # Exercise HA's actual entity service rather than calling the adapter method.
     from homeassistant.core import Context
@@ -231,8 +236,12 @@ async def test_ha_to_rust_maintenance_contract(
         blocking=True,
         return_response=True,
     )
-    assert todo["todo.maintenance"]["items"][0]["uid"] == second["occurrence"]["id"]
-    assert hass.states.get("sensor.maintenance_completed").state == "1"
+    items = entity_items(todo, "todo.maintenance")
+    assert len(items) == 1
+    assert items[0]["uid"] == second["occurrence"]["id"]
+    state = hass.states.get("sensor.maintenance_completed")
+    assert state is not None
+    assert state.state == "1"
 
     # Both an old occurrence and a stale version fail without a second event.
     rejected = await user.post(
@@ -254,6 +263,7 @@ async def test_ha_to_rust_maintenance_contract(
         blocking=True,
         return_response=True,
     )
+    assert result is not None
     assert result["revision"] == 3
     events = await (await user.get(f"{PREFIX}/items/replace-filter/events")).json()
     assert len(events["items"]) == 2
@@ -270,8 +280,12 @@ async def test_ha_to_rust_maintenance_contract(
     )
     assert archived.status == 200
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("todo.maintenance").state == "0"
-    assert hass.states.get("sensor.maintenance_completed").state == "2"
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "0"
+    state = hass.states.get("sensor.maintenance_completed")
+    assert state is not None
+    assert state.state == "2"
 
 
 @pytest.mark.parametrize("rust_backend", [True], indirect=True, ids=["app"])
@@ -302,7 +316,9 @@ async def test_generated_pairing_reaches_loaded_and_reports_presence(
     assert entry.state is ConfigEntryState.LOADED
     assert entry.data[CONF_ADDON_SLUG] == "testrepo_home_maintenance"
     for key in SUMMARY_KEYS:
-        assert hass.states.get(f"sensor.maintenance_{key}").state == "0"
+        state = hass.states.get(f"sensor.maintenance_{key}")
+        assert state is not None
+        assert state.state == "0"
     async with async_get_clientsession(hass).get(
         f"{rust_backend.origin}/v1/system",
         headers={"Authorization": f"Bearer {rust_backend.integration_token}"},
@@ -315,9 +331,9 @@ async def test_generated_pairing_reaches_loaded_and_reports_presence(
 
 async def test_native_checklist_preserves_parent_and_archives_step_progress(
     hass: HomeAssistant,
-    hass_client,
-    hass_user,
-    hass_user_token,
+    hass_client: ClientSessionGenerator,
+    hass_user: MockUser,
+    hass_user_token: str,
     rust_backend: RustBackend,
 ) -> None:
     """Real HA actions update current steps; explicit parent completion resets them."""
@@ -340,7 +356,7 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     admin = await hass_client()
     user = await hass_client(hass_user_token)
 
-    async def calendar_events(due: date) -> list[dict[str, object]]:
+    async def calendar_events(due: date) -> list[JsonObjectType]:
         response = await user.get(
             "/api/calendars/calendar.maintenance",
             params={
@@ -380,18 +396,20 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
         blocking=True,
         return_response=True,
     )
-    assert len(todo["todo.maintenance"]["items"]) == 1
-    assert todo["todo.maintenance"]["items"][0]["summary"] == original.summary
-    assert (
-        "Checklist (0/2 complete)"
-        in todo["todo.maintenance"]["items"][0]["description"]
-    )
+    items = entity_items(todo, "todo.maintenance")
+    assert len(items) == 1
+    assert items[0]["summary"] == original.summary
+    description = items[0]["description"]
+    assert isinstance(description, str)
+    assert "Checklist (0/2 complete)" in description
     scheduled = await calendar_events(original.due)
     assert len(scheduled) == 1
     assert scheduled[0]["uid"] == str(original.occurrence_id)
     assert scheduled[0]["start"] == {"date": original.due.isoformat()}
     assert scheduled[0]["summary"] == original.summary
-    assert "Checklist (0/2 complete)" in scheduled[0]["description"]
+    description = scheduled[0]["description"]
+    assert isinstance(description, str)
+    assert "Checklist (0/2 complete)" in description
 
     first_step = {
         "item_id": original.id,
@@ -410,6 +428,7 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
             blocking=True,
             return_response=True,
         )
+        assert result is not None
         assert result["revision"] == original.revision + 1
         assert result["occurrence_id"] == str(original.occurrence_id)
     changed = await user.get(f"{PREFIX}/items/{original.id}")
@@ -440,11 +459,15 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     assert current.checklist[1].completion is not None
     assert current.checklist[1].completion.actor.kind is ActorKind.SYSTEM
     assert current.checklist[1].completion.actor.id == "ha:automation"
-    assert hass.states.get("todo.maintenance").state == "1"
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "1"
     assert entry.runtime_data.data.summary["completed"] == 0
     scheduled = await calendar_events(original.due)
     assert scheduled[0]["uid"] == str(original.occurrence_id)
-    assert "Checklist (2/2 complete)" in scheduled[0]["description"]
+    description = scheduled[0]["description"]
+    assert isinstance(description, str)
+    assert "Checklist (2/2 complete)" in description
 
     await hass.services.async_call(
         "todo",
@@ -473,7 +496,9 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     assert scheduled[0]["end"] == {
         "date": (successor.due + timedelta(days=1)).isoformat()
     }
-    assert "Checklist (0/2 complete)" in scheduled[0]["description"]
+    description = scheduled[0]["description"]
+    assert isinstance(description, str)
+    assert "Checklist (0/2 complete)" in description
     events_response = await user.get(f"{PREFIX}/items/{original.id}/events")
     events = await events_response.json()
     assert len(events["items"]) == 1

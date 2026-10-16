@@ -4,7 +4,10 @@ import json
 
 import pytest
 from homeassistant.core import HomeAssistant
+from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
     MAX_REQUEST_BYTES,
     MAX_RESPONSE_BYTES,
@@ -16,7 +19,11 @@ PREFIX = "/api/home_maintenance/v1"
 
 
 async def test_authentication_and_human_attribution(
-    hass_client, hass_user_token, hass_user, entry, backend: Backend
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     anonymous = await hass_client(None)
     assert (await anonymous.get(f"{PREFIX}/summary")).status == 401
@@ -58,7 +65,13 @@ async def test_authentication_and_human_attribution(
     ],
 )
 async def test_only_admin_can_change_definitions(
-    hass_client, hass_user_token, hass_admin_user, entry, backend: Backend, method, path
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    hass_admin_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    method: str,
+    path: str,
 ) -> None:
     user = await hass_client(hass_user_token)
     before = len(backend.requests)
@@ -90,7 +103,12 @@ async def test_only_admin_can_change_definitions(
     ],
 )
 async def test_route_and_query_allowlist(
-    hass_client, entry, backend: Backend, method, path, status
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    method: str,
+    path: str,
+    status: int,
 ) -> None:
     client = await hass_client()
     before = len(backend.requests)
@@ -100,7 +118,10 @@ async def test_route_and_query_allowlist(
 
 
 async def test_query_response_headers_and_unload(
-    hass: HomeAssistant, hass_client, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     backend.responses[("GET", f"/v1/items/{ITEM_ID}")] = (
         412,
@@ -134,7 +155,9 @@ async def test_query_response_headers_and_unload(
     assert len(backend.requests) == count
 
 
-async def test_body_and_response_limits(hass_client, entry, backend: Backend) -> None:
+async def test_body_and_response_limits(
+    hass_client: ClientSessionGenerator, entry: MaintenanceConfigEntry, backend: Backend
+) -> None:
     client = await hass_client()
     response = await client.post(f"{PREFIX}/items", data=b"x" * (MAX_REQUEST_BYTES + 1))
     assert response.status == 413
@@ -146,7 +169,9 @@ async def test_body_and_response_limits(hass_client, entry, backend: Backend) ->
     assert (await client.get(f"{PREFIX}/items/{ITEM_ID}")).status == 502
 
 
-async def test_redirect_is_not_followed(hass_client, entry, backend: Backend) -> None:
+async def test_redirect_is_not_followed(
+    hass_client: ClientSessionGenerator, entry: MaintenanceConfigEntry, backend: Backend
+) -> None:
     backend.responses[("GET", f"/v1/items/{ITEM_ID}")] = (
         302,
         b"",
