@@ -13,6 +13,7 @@ use crate::{
     error::Error,
     models::{
         Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Occurrence, Page,
+        Reorder, ReorderContent, ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder,
         SetChecklistStep, StepCompletion, Summary, UpdateItem,
     },
 };
@@ -42,6 +43,44 @@ const OCCURRENCE_ADVANCE: &str =
 const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 ORDER BY due,id LIMIT 200";
 const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND (due,id)>(?,?) ORDER BY due,id LIMIT 200";
 const COMPLETION_COUNT: &str = "SELECT count(*) FROM completions";
+const REORDER_INSERT: &str = "INSERT INTO reorders(id,receipt) VALUES(?,?)";
+const REORDER_GET: &str =
+    "SELECT sequence,receipt,status,revision,resolved_at,resolved_by FROM reorders WHERE id=?";
+const REORDER_LIST: &str = "SELECT sequence,receipt,status,revision,resolved_at,resolved_by FROM reorders WHERE status=? ORDER BY sequence LIMIT ?";
+const REORDER_LIST_NEXT: &str = "SELECT sequence,receipt,status,revision,resolved_at,resolved_by FROM reorders WHERE status=? AND sequence>? ORDER BY sequence LIMIT ?";
+const REORDER_RESOLVE: &str =
+    "UPDATE reorders SET status=?,revision=?,resolved_at=?,resolved_by=? WHERE id=?";
+#[derive(FromRow)]
+struct ReorderRow {
+    sequence: i64,
+    receipt: String,
+    status: String,
+    revision: i64,
+    resolved_at: Option<String>,
+    resolved_by: Option<String>,
+}
+impl TryFrom<ReorderRow> for Reorder {
+    type Error = Error;
+    fn try_from(row: ReorderRow) -> Result<Self, Error> {
+        let status = match row.status.as_str() {
+            "pending" => ReorderStatus::Pending,
+            "fulfilled" => ReorderStatus::Fulfilled,
+            "dismissed" => ReorderStatus::Dismissed,
+            _ => return Err(corrupt()),
+        };
+        Ok(Self {
+            request: serde_json::from_str(&row.receipt)?,
+            status,
+            revision: row.revision,
+            resolved_at: row.resolved_at.as_deref().map(parse_time).transpose()?,
+            resolved_by: row
+                .resolved_by
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+        })
+    }
+}
 #[derive(FromRow)]
 struct ItemRow {
     id: String,
@@ -172,6 +211,12 @@ struct ItemCursor {
 #[serde(deny_unknown_fields)]
 struct EventCursor {
     item_id: ItemId,
+    sequence: i64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReorderCursor {
+    status: ReorderStatus,
     sequence: i64,
 }
 
@@ -491,6 +536,153 @@ impl Store {
         transaction.commit().await?;
         Ok(result)
     }
+    pub async fn reorder(
+        &self,
+        id: &ItemId,
+        revision: i64,
+        input: ReorderItem,
+        actor: &Actor,
+        key: &str,
+    ) -> Result<ReorderReceipt, Error> {
+        let fingerprint = fingerprint("reorder", &(id, revision, input))?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // A durable acknowledgement outlives every mutable source check. In
+        // particular a delayed retry must never become another physical press.
+        if let Some(receipt) = replay(&mut transaction, actor, key, &fingerprint).await? {
+            return Ok(receipt);
+        }
+        let item = get_item(&mut transaction, id).await?;
+        check_revision(&item, revision)?;
+        if item.archived {
+            return Err(Error::Conflict("archived items cannot be reordered"));
+        }
+        let reorder_url = item
+            .definition
+            .reorder_url
+            .ok_or(Error::Conflict("the item has no reorder URL"))?;
+        let now: String = sqlx::query_scalar(DATABASE_NOW)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let receipt = ReorderReceipt {
+            id: Uuid::now_v7(),
+            item_id: item.id,
+            item_revision: revision,
+            requested_at: parse_time(&now)?,
+            actor: actor.clone(),
+            item: ReorderContent {
+                name: item.definition.name,
+                summary: item.definition.summary,
+                description: item.definition.description,
+                specs: item.definition.specs,
+                resources: item.definition.resources,
+                reorder_url,
+            },
+        };
+        sqlx::query(REORDER_INSERT)
+            .bind(receipt.id.to_string())
+            .bind(serde_json::to_string(&receipt)?)
+            .execute(&mut *transaction)
+            .await?;
+        save_replay(&mut transaction, actor, key, &fingerprint, &receipt).await?;
+        transaction.commit().await?;
+        Ok(receipt)
+    }
+
+    pub async fn get_reorder(&self, id: Uuid) -> Result<Reorder, Error> {
+        let mut connection = self.pool.acquire().await?;
+        get_reorder(&mut connection, id).await
+    }
+
+    pub async fn reorders(
+        &self,
+        status: ReorderStatus,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Page<Reorder>, Error> {
+        check_limit(limit)?;
+        let after: Option<ReorderCursor> = cursor.map(decode).transpose()?;
+        if after
+            .as_ref()
+            .is_some_and(|value| value.status != status || value.sequence <= 0)
+        {
+            return Err(Error::Invalid(
+                "page token belongs to a different reorder filter",
+            ));
+        }
+        let rows: Vec<ReorderRow> = if let Some(after) = after {
+            sqlx::query_as(REORDER_LIST_NEXT)
+                .bind(status.as_str())
+                .bind(after.sequence)
+                .bind(i64::from(limit) + 1)
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            sqlx::query_as(REORDER_LIST)
+                .bind(status.as_str())
+                .bind(i64::from(limit) + 1)
+                .fetch_all(&self.pool)
+                .await?
+        };
+        let next_page = if rows.len() > limit as usize {
+            rows.get(limit as usize - 1)
+                .map(|row| {
+                    encode(&ReorderCursor {
+                        status,
+                        sequence: row.sequence,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let items = rows
+            .into_iter()
+            .take(limit as usize)
+            .map(Reorder::try_from)
+            .collect::<Result<_, _>>()?;
+        Ok(Page { items, next_page })
+    }
+
+    pub async fn resolve_reorder(
+        &self,
+        id: Uuid,
+        revision: i64,
+        input: ResolveReorder,
+        actor: &Actor,
+    ) -> Result<Reorder, Error> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut reorder = get_reorder(&mut transaction, id).await?;
+        if reorder.revision != revision {
+            return Err(Error::Precondition);
+        }
+        let status = ReorderStatus::from(input.status);
+        if reorder.status == status {
+            return Ok(reorder);
+        }
+        if reorder.status != ReorderStatus::Pending {
+            return Err(Error::Conflict(
+                "resolved reorder requests cannot change status",
+            ));
+        }
+        let now: String = sqlx::query_scalar(DATABASE_NOW)
+            .fetch_one(&mut *transaction)
+            .await?;
+        reorder.status = status;
+        reorder.revision = next_revision(reorder.revision)?;
+        reorder.resolved_at = Some(parse_time(&now)?);
+        reorder.resolved_by = Some(actor.clone());
+        sqlx::query(REORDER_RESOLVE)
+            .bind(status.as_str())
+            .bind(reorder.revision)
+            .bind(now)
+            .bind(serde_json::to_string(actor)?)
+            .bind(id.to_string())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(reorder)
+    }
+
     pub async fn summary(&self) -> Result<Summary, Error> {
         #[derive(FromRow)]
         struct DueRow {
@@ -571,6 +763,14 @@ async fn get_item(connection: &mut SqliteConnection, id: &ItemId) -> Result<Item
         .ok_or(Error::NotFound)?;
     row.try_into()
 }
+async fn get_reorder(connection: &mut SqliteConnection, id: Uuid) -> Result<Reorder, Error> {
+    let row: ReorderRow = sqlx::query_as(REORDER_GET)
+        .bind(id.to_string())
+        .fetch_optional(connection)
+        .await?
+        .ok_or(Error::NotFound)?;
+    row.try_into()
+}
 async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> Result<(), Error> {
     let result = sqlx::query(ITEM_INSERT)
         .bind(input.id.as_ref())
@@ -597,12 +797,12 @@ fn fingerprint(operation: &str, input: &impl Serialize) -> Result<Vec<u8>, Error
     hash.update(serde_json::to_vec(input)?);
     Ok(hash.finalize().to_vec())
 }
-async fn replay(
+async fn replay<T: serde::de::DeserializeOwned>(
     connection: &mut SqliteConnection,
     actor: &Actor,
     key: &str,
     fingerprint: &[u8],
-) -> Result<Option<Item>, Error> {
+) -> Result<Option<T>, Error> {
     let row: Option<(Vec<u8>, String)> = sqlx::query_as(IDEMPOTENCY_GET)
         .bind(actor.key())
         .bind(key)
@@ -623,7 +823,7 @@ async fn save_replay(
     actor: &Actor,
     key: &str,
     fingerprint: &[u8],
-    response: &Item,
+    response: &impl Serialize,
 ) -> Result<(), Error> {
     sqlx::query(IDEMPOTENCY_INSERT)
         .bind(actor.key())
@@ -1006,6 +1206,270 @@ mod tests {
         let report = serde_json::to_string_pretty(&evidence).unwrap();
         println!("{report}");
         if let Ok(path) = std::env::var("MAINTENANCE_QUERY_PLAN_OUTPUT") {
+            std::fs::write(path, report).unwrap();
+        }
+        store.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn reorder_migration_preserves_existing_tasks_history_and_receipts() {
+        use crate::models::ReorderItem;
+        let directory = tempfile::tempdir().unwrap();
+        let migration_directory = directory.path().join("old-migrations");
+        std::fs::create_dir(&migration_directory).unwrap();
+        std::fs::write(
+            migration_directory.join("0001_maintenance.sql"),
+            include_str!("../migrations/0001_maintenance.sql"),
+        )
+        .unwrap();
+        let database = directory.path().join("upgrade.sqlite3");
+        let pool = SqlitePoolOptions::new()
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(migration_directory.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let old = Store { pool };
+        let seed: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let mut input = seed.items[0].clone();
+        input.definition.reorder_url = Some("https://example.invalid/replacement".into());
+        let actor = Actor::System {
+            id: SystemActor::Owner,
+            name: "Owner credential".into(),
+        };
+        let original = old
+            .create(input.clone(), &actor, "before-upgrade-create")
+            .await
+            .unwrap();
+        let completion = CompleteItem {
+            occurrence_id: original.occurrence.id,
+        };
+        let completed = old
+            .complete(
+                &original.id,
+                original.revision,
+                completion.clone(),
+                &actor,
+                "before-upgrade-completion",
+            )
+            .await
+            .unwrap();
+        let migration_count: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
+            .fetch_one(old.pool())
+            .await
+            .unwrap();
+        assert_eq!(migration_count, 1);
+        old.close().await.unwrap();
+        let upgraded = Store::open(&database).await.unwrap();
+        let current = upgraded.get(&original.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_vec(&current).unwrap(),
+            serde_json::to_vec(&completed).unwrap()
+        );
+        let replay = upgraded
+            .complete(
+                &original.id,
+                original.revision,
+                completion,
+                &actor,
+                "before-upgrade-completion",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&replay).unwrap(),
+            serde_json::to_vec(&completed).unwrap()
+        );
+        let create_replay = upgraded
+            .create(input, &actor, "before-upgrade-create")
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&create_replay).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+        assert_eq!(
+            upgraded
+                .events(&current.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        let receipt = upgraded
+            .reorder(
+                &current.id,
+                current.revision,
+                ReorderItem::default(),
+                &actor,
+                "after-upgrade-reorder",
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt.item_id, current.id);
+        assert_eq!(upgraded.summary().await.unwrap().completed, 1);
+        upgraded.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn reorder_queries_use_status_sequence_and_identity_indexes() {
+        use crate::models::{ReorderItem, ReorderResolution, ReorderStatus, ResolveReorder};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("reorder-plans.sqlite3"))
+            .await
+            .unwrap();
+        let seed: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let mut input = seed.items[0].clone();
+        input.definition.reorder_url = Some("https://example.invalid/replacement".into());
+        let actor = Actor::System {
+            id: SystemActor::Integration,
+            name: "Home Assistant integration".into(),
+        };
+        let item = store
+            .create(input, &actor, "seed-reorder-plans")
+            .await
+            .unwrap();
+        let mut sample = None;
+        for index in 0..600 {
+            let receipt = store
+                .reorder(
+                    &item.id,
+                    item.revision,
+                    ReorderItem::default(),
+                    &actor,
+                    &format!("plan-press-{index}"),
+                )
+                .await
+                .unwrap();
+            if index % 3 != 0 {
+                store
+                    .resolve_reorder(
+                        receipt.id,
+                        1,
+                        ResolveReorder {
+                            status: if index % 3 == 1 {
+                                ReorderResolution::Fulfilled
+                            } else {
+                                ReorderResolution::Dismissed
+                            },
+                        },
+                        &actor,
+                    )
+                    .await
+                    .unwrap();
+            }
+            sample = Some(receipt);
+        }
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+        let receipt = sample.unwrap();
+        enum Parameter {
+            Text(String),
+            Integer(i64),
+        }
+        use Parameter::{Integer, Text};
+        let queries = [
+            (
+                "reorder first page",
+                REORDER_LIST,
+                vec![Text("pending".into()), Integer(101)],
+            ),
+            (
+                "reorder continuation",
+                REORDER_LIST_NEXT,
+                vec![Text("pending".into()), Integer(300), Integer(101)],
+            ),
+            (
+                "reorder receipt lookup",
+                REORDER_GET,
+                vec![Text(receipt.id.to_string())],
+            ),
+            (
+                "reorder insertion",
+                REORDER_INSERT,
+                vec![
+                    Text(Uuid::now_v7().to_string()),
+                    Text(serde_json::to_string(&receipt).unwrap()),
+                ],
+            ),
+            (
+                "reorder resolution",
+                REORDER_RESOLVE,
+                vec![
+                    Text("fulfilled".into()),
+                    Integer(2),
+                    Text("2031-02-17T12:00:00Z".into()),
+                    Text(serde_json::to_string(&actor).unwrap()),
+                    Text(receipt.id.to_string()),
+                ],
+            ),
+        ];
+        let mut evidence = Vec::new();
+        for (name, query, parameters) in queries {
+            let mut details = Vec::new();
+            for prefix in ["EXPLAIN QUERY PLAN ", "EXPLAIN "] {
+                let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+                builder.push(query);
+                let mut statement = builder.build();
+                for parameter in &parameters {
+                    statement = match parameter {
+                        Text(value) => statement.bind(value),
+                        Integer(value) => statement.bind(value),
+                    };
+                }
+                let rows = statement.fetch_all(store.pool()).await.unwrap();
+                if prefix == "EXPLAIN QUERY PLAN " {
+                    details = rows
+                        .iter()
+                        .map(|row| row.get::<String, _>("detail"))
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !details
+                            .iter()
+                            .any(|line| line.contains("TEMP B-TREE") || line.starts_with("SCAN")),
+                        "{name}: {details:?}"
+                    );
+                    if name == "reorder first page" || name == "reorder continuation" {
+                        assert!(
+                            details
+                                .iter()
+                                .any(|line| line.contains("reorders_status_sequence")),
+                            "{details:?}"
+                        );
+                    } else if name != "reorder insertion" {
+                        assert!(
+                            details.iter().all(|line| line.starts_with("SEARCH")),
+                            "{details:?}"
+                        );
+                    }
+                } else {
+                    assert!(!rows.is_empty());
+                    details.push(format!(
+                        "{} SQLite VM instructions, representative bindings",
+                        rows.len()
+                    ));
+                }
+            }
+            evidence.push((name, details));
+        }
+        let page = store
+            .reorders(ReorderStatus::Pending, None, 100)
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 100);
+        assert!(page.next_page.is_some());
+        let report = serde_json::to_string_pretty(&evidence).unwrap();
+        println!("{report}");
+        if let Ok(path) = std::env::var("MAINTENANCE_REORDER_QUERY_PLAN_OUTPUT") {
             std::fs::write(path, report).unwrap();
         }
         store.close().await.unwrap();

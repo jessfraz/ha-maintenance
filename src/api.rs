@@ -19,8 +19,9 @@ use uuid::Uuid;
 use crate::{
     installation::{Installation, InstallationReport, PresenceReport},
     models::{
-        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Page,
-        SetChecklistStep, Summary, SystemActor, UpdateItem,
+        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Page, Reorder,
+        ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder, SetChecklistStep, Summary,
+        SystemActor, UpdateItem,
     },
     store::Store,
 };
@@ -261,6 +262,14 @@ fn item_response(item: Item) -> ItemResponse {
     let headers = item_headers(&item);
     HttpResponseHeaders::new(HttpResponseOk(item), headers)
 }
+type ReorderResponse = HttpResponseHeaders<HttpResponseOk<Reorder>, ItemHeaders>;
+fn reorder_response(reorder: Reorder) -> ReorderResponse {
+    let headers = ItemHeaders {
+        etag: format!("\"{}\"", reorder.revision),
+        cache_control: "no-store".into(),
+    };
+    HttpResponseHeaders::new(HttpResponseOk(reorder), headers)
+}
 #[derive(Deserialize, JsonSchema)]
 struct ItemPath {
     id: ItemId,
@@ -269,6 +278,18 @@ struct ItemPath {
 struct ChecklistPath {
     id: ItemId,
     step_id: Uuid,
+}
+#[derive(Deserialize, JsonSchema)]
+struct ReorderPath {
+    id: Uuid,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReorderQuery {
+    #[serde(default)]
+    status: ReorderStatus,
+    limit: Option<u32>,
+    page_token: Option<String>,
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -386,6 +407,89 @@ async fn item_complete(
                 body.into_inner(),
                 &principal.actor,
                 idempotency(&request)?,
+            )
+            .await?,
+    ))
+}
+/// Persist a reorder request and immutable acknowledgement without purchasing anything.
+/// Exact retries return the original receipt, even after source or request changes.
+#[endpoint {method=POST,path="/v1/items/{id}/reorders",tags=["reorders"]}]
+async fn item_reorder(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ItemPath>,
+    body: TypedBody<ReorderItem>,
+) -> Result<HttpResponseHeaders<HttpResponseCreated<ReorderReceipt>, PrivateHeaders>, HttpError> {
+    let principal = authenticate(&request)?;
+    let receipt = request
+        .context()
+        .store
+        .reorder(
+            &path.into_inner().id,
+            revision(&request)?,
+            body.into_inner(),
+            &principal.actor,
+            idempotency(&request)?,
+        )
+        .await?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseCreated(receipt),
+        PrivateHeaders {
+            cache_control: "no-store".into(),
+        },
+    ))
+}
+/// List requests in stable creation order with a status-scoped cursor.
+#[endpoint {method=GET,path="/v1/reorders",tags=["reorders"]}]
+async fn reorders_list(
+    request: RequestContext<Arc<Context>>,
+    query: Query<ReorderQuery>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<Page<Reorder>>, PrivateHeaders>, HttpError> {
+    authenticate(&request)?;
+    let query = query.into_inner();
+    Ok(private(
+        request
+            .context()
+            .store
+            .reorders(
+                query.status,
+                query.page_token.as_deref(),
+                page_limit(query.limit)?,
+            )
+            .await?,
+    ))
+}
+#[endpoint {method=GET,path="/v1/reorders/{id}",tags=["reorders"]}]
+async fn reorder_get(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ReorderPath>,
+) -> Result<ReorderResponse, HttpError> {
+    authenticate(&request)?;
+    Ok(reorder_response(
+        request
+            .context()
+            .store
+            .get_reorder(path.into_inner().id)
+            .await?,
+    ))
+}
+/// Resolve a pending request. Terminal records and their receipts are retained.
+/// Repeating the same status with the current ETag is a no-op; a stale ETag is 412.
+#[endpoint {method=PUT,path="/v1/reorders/{id}/resolution",tags=["reorders"]}]
+async fn reorder_resolve(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ReorderPath>,
+    body: TypedBody<ResolveReorder>,
+) -> Result<ReorderResponse, HttpError> {
+    let principal = administrator(&request)?;
+    Ok(reorder_response(
+        request
+            .context()
+            .store
+            .resolve_reorder(
+                path.into_inner().id,
+                revision(&request)?,
+                body.into_inner(),
+                &principal.actor,
             )
             .await?,
     ))
@@ -610,13 +714,17 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 21] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 25] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
         item_get.into(),
         item_update.into(),
         item_complete.into(),
+        item_reorder.into(),
+        reorders_list.into(),
+        reorder_get.into(),
+        reorder_resolve.into(),
         checklist_step_set.into(),
         item_archive.into(),
         item_restore.into(),
@@ -639,7 +747,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     Ok(api)
 }
 pub fn openapi() -> Result<serde_json::Value> {
-    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local maintenance definitions, recurring occurrences and completion history. Bearer authentication. Creates, completions and checklist changes require Idempotency-Key; item mutations require the current quoted If-Match revision.").json().map_err(Into::into)
+    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local maintenance definitions, recurring occurrences, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.").json().map_err(Into::into)
 }
 pub fn start(bind: SocketAddr, context: Arc<Context>) -> Result<HttpServer<Arc<Context>>> {
     start_with_logger(bind, context, crate::logging::logger())

@@ -1125,3 +1125,684 @@ async fn summary_counts_archived_and_completed_separately() {
     assert_eq!(summary.completed, 1);
     f.finish().await;
 }
+
+async fn reorderable(f: &Fixture, id: &str) -> Item {
+    let item = f.create(id).await;
+    f.store
+        .update(
+            &item.id,
+            item.revision,
+            UpdateItem {
+                reorder_url: Change(Some(Some("https://example.invalid/replacement".into()))),
+                specs: Change(Some(vec![home_maintenance::models::Spec {
+                    label: "Size".into(),
+                    value: "Demonstration medium".into(),
+                }])),
+                resources: Change(Some(vec![home_maintenance::models::Resource {
+                    label: "Instructions".into(),
+                    url: "https://example.invalid/instructions".into(),
+                }])),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn reorder(f: &Fixture, item: &Item, key: &str) -> Response {
+    f.client
+        .post(format!(
+            "{}/v1/items/{}/reorders",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .header("Idempotency-Key", key)
+        .json(&home_maintenance::models::ReorderItem::default())
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reorder_receipts_survive_source_edits_archive_deletion_and_resolution() {
+    use home_maintenance::models::{
+        Reorder, ReorderReceipt, ReorderResolution, ReorderStatus, ResolveReorder,
+    };
+    let f = Fixture::new().await;
+    let item = reorderable(&f, "example-reorder").await;
+    let before = serde_json::to_vec(&f.get(item.id.as_ref()).await).unwrap();
+    let response = reorder(&f, &item, "physical-press").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let receipt: ReorderReceipt = response.json().await.unwrap();
+    assert_eq!(receipt.item_id, item.id);
+    assert_eq!(receipt.item_revision, item.revision);
+    assert_eq!(receipt.item.name, item.definition.name);
+    assert_eq!(receipt.item.summary, item.definition.summary);
+    assert_eq!(receipt.item.description, item.definition.description);
+    assert_eq!(receipt.item.specs, item.definition.specs);
+    assert_eq!(receipt.item.resources, item.definition.resources);
+    assert_eq!(
+        receipt.item.reorder_url,
+        "https://example.invalid/replacement"
+    );
+    assert_eq!(receipt.actor.key(), "system:ha:integration");
+    assert_eq!(
+        serde_json::to_vec(&f.get(item.id.as_ref()).await).unwrap(),
+        before
+    );
+    assert_eq!(f.store.summary().await.unwrap().completed, 0);
+
+    let changed = f
+        .store
+        .update(
+            &item.id,
+            item.revision,
+            UpdateItem {
+                name: Change(Some("Updated example task".into())),
+                summary: Change(Some("Inspect a different example".into())),
+                description: Change(Some(None)),
+                specs: Change(Some(vec![])),
+                resources: Change(Some(vec![])),
+                reorder_url: Change(Some(None)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let replay: ReorderReceipt = reorder(&f, &item, "physical-press")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, receipt);
+    f.store
+        .archive(&item.id, changed.revision, true)
+        .await
+        .unwrap();
+    let replay: ReorderReceipt = reorder(&f, &item, "physical-press")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, receipt);
+    let owner = Actor::System {
+        id: home_maintenance::models::SystemActor::Owner,
+        name: "Owner credential".into(),
+    };
+    let resolved = f
+        .store
+        .resolve_reorder(
+            receipt.id,
+            1,
+            ResolveReorder {
+                status: ReorderResolution::Dismissed,
+            },
+            &owner,
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved.status, ReorderStatus::Dismissed);
+    sqlx::query("DELETE FROM items WHERE id=?")
+        .bind(item.id.as_ref())
+        .execute(f.store.pool())
+        .await
+        .unwrap();
+    let response = reorder(&f, &item, "physical-press").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.json::<ReorderReceipt>().await.unwrap(), receipt);
+    let response = f
+        .client
+        .get(format!("{}/v1/reorders/{}", f.origin, receipt.id))
+        .bearer_auth(INTEGRATION)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["etag"], "\"2\"");
+    assert_eq!(response.json::<Reorder>().await.unwrap(), resolved);
+    assert!(
+        f.store
+            .reorders(ReorderStatus::Pending, None, 100)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn reorder_concurrency_actor_scope_and_shared_ledger_distinguish_physical_presses() {
+    use home_maintenance::models::ReorderReceipt;
+    let f = Fixture::new().await;
+    let item = reorderable(&f, "example-concurrent-reorders").await;
+    let (first, retry) = tokio::join!(reorder(&f, &item, "press-a"), reorder(&f, &item, "press-a"));
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(retry.status(), StatusCode::CREATED);
+    let first: ReorderReceipt = first.json().await.unwrap();
+    assert_eq!(retry.json::<ReorderReceipt>().await.unwrap(), first);
+    let (second, third) =
+        tokio::join!(reorder(&f, &item, "press-b"), reorder(&f, &item, "press-c"));
+    let second: ReorderReceipt = second.json().await.unwrap();
+    let third: ReorderReceipt = third.json().await.unwrap();
+    assert_ne!(first.id, second.id);
+    assert_ne!(second.id, third.id);
+    let endpoint = format!("{}/v1/items/{}/reorders", f.origin, item.id.as_ref());
+    let owner_response = f
+        .client
+        .post(&endpoint)
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .header("Idempotency-Key", "press-a")
+        .json(&home_maintenance::models::ReorderItem::default())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), StatusCode::CREATED);
+    let owned: ReorderReceipt = owner_response.json().await.unwrap();
+    assert_ne!(first.id, owned.id);
+    assert_eq!(owned.actor.key(), "system:owner");
+    // The same actor cannot reuse a receipt key for completion or a changed revision.
+    let response = f
+        .client
+        .post(format!(
+            "{}/v1/items/{}/completions",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .header("Idempotency-Key", "press-a")
+        .json(&CompleteItem {
+            occurrence_id: item.occurrence.id,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let mut changed_request = item.clone();
+    changed_request.revision += 1;
+    assert_eq!(
+        reorder(&f, &changed_request, "press-a").await.status(),
+        StatusCode::CONFLICT
+    );
+    let other = reorderable(&f, "example-other-reorder").await;
+    assert_eq!(
+        reorder(&f, &other, "press-a").await.status(),
+        StatusCode::CONFLICT
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM reorders")
+        .fetch_one(f.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 4);
+    assert_eq!(f.get(item.id.as_ref()).await.revision, item.revision);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn reorder_rejections_do_not_create_a_request_or_poison_a_key() {
+    let f = Fixture::new().await;
+    let item = f.create("example-no-reorder").await;
+    let endpoint = format!("{}/v1/items/{}/reorders", f.origin, item.id.as_ref());
+    let empty = home_maintenance::models::ReorderItem::default();
+    for body in ["[]", "null", "\"example\""] {
+        assert_eq!(
+            f.client
+                .post(&endpoint)
+                .bearer_auth(OWNER)
+                .header("If-Match", "\"1\"")
+                .header("Idempotency-Key", "wrong-json-shape")
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        f.client
+            .post(&endpoint)
+            .json(&empty)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        f.client
+            .post(&endpoint)
+            .bearer_auth(INTEGRATION)
+            .header("If-Match", "\"1\"")
+            .header("Idempotency-Key", "untrusted")
+            .json(&empty)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        f.client
+            .post(&endpoint)
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", "missing-revision")
+            .json(&empty)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    assert_eq!(
+        f.client
+            .post(&endpoint)
+            .bearer_auth(OWNER)
+            .header("If-Match", "\"1\"")
+            .json(&empty)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.client
+            .post(&endpoint)
+            .bearer_auth(OWNER)
+            .header("If-Match", "\"1\"")
+            .header("Idempotency-Key", "untrusted-content")
+            .header("content-type", "application/json")
+            .body(r#"{"reorder_url":"https://example.invalid/forged"}"#)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        reorder(&f, &item, "retry-after-configure").await.status(),
+        StatusCode::CONFLICT
+    );
+    let item = f
+        .store
+        .update(
+            &item.id,
+            item.revision,
+            UpdateItem {
+                reorder_url: Change(Some(Some("https://example.invalid/part".into()))),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reorder(&f, &item, "retry-after-configure").await.status(),
+        StatusCode::CREATED
+    );
+    let mut stale = item.clone();
+    stale.revision -= 1;
+    assert_eq!(
+        reorder(&f, &stale, "stale-press").await.status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    let archived = f
+        .store
+        .archive(&item.id, item.revision, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        reorder(&f, &archived, "archived-press").await.status(),
+        StatusCode::CONFLICT
+    );
+    let mut missing = item;
+    missing.id = "example-missing".to_owned().try_into().unwrap();
+    assert_eq!(
+        reorder(&f, &missing, "missing-press").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM reorders")
+        .fetch_one(f.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn reorder_and_receipt_roll_back_together_when_the_ledger_write_fails() {
+    use home_maintenance::models::ReorderReceipt;
+    let f = Fixture::new().await;
+    let item = reorderable(&f, "example-rollback").await;
+    sqlx::query("CREATE TRIGGER fail_reorder_receipt BEFORE INSERT ON idempotency WHEN NEW.key='failing-press' BEGIN SELECT RAISE(ABORT,'test ledger unavailable'); END").execute(f.store.pool()).await.unwrap();
+    assert_eq!(
+        reorder(&f, &item, "failing-press").await.status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let requests: i64 = sqlx::query_scalar("SELECT count(*) FROM reorders")
+        .fetch_one(f.store.pool())
+        .await
+        .unwrap();
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM idempotency WHERE key='failing-press'")
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+    assert_eq!((requests, receipts), (0, 0));
+    sqlx::query("DROP TRIGGER fail_reorder_receipt")
+        .execute(f.store.pool())
+        .await
+        .unwrap();
+    let response = reorder(&f, &item, "failing-press").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let first: ReorderReceipt = response.json().await.unwrap();
+    assert_eq!(
+        reorder(&f, &item, "failing-press")
+            .await
+            .json::<ReorderReceipt>()
+            .await
+            .unwrap(),
+        first
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn reorder_listing_and_terminal_resolution_are_bounded_and_concurrent_safe() {
+    use home_maintenance::models::{
+        Reorder, ReorderReceipt, ReorderResolution, ReorderStatus, ResolveReorder,
+    };
+    let f = Fixture::new().await;
+    let item = reorderable(&f, "example-paged-reorders").await;
+    let mut ids = Vec::new();
+    for index in 0..5 {
+        let receipt: ReorderReceipt = reorder(&f, &item, &format!("page-press-{index}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        ids.push(receipt.id);
+    }
+    let list_url = format!("{}/v1/reorders", f.origin);
+    let first: Page<Reorder> = f
+        .client
+        .get(&list_url)
+        .bearer_auth(INTEGRATION)
+        .query(&[("limit", "2")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        first
+            .items
+            .iter()
+            .map(|record| record.request.id)
+            .collect::<Vec<_>>(),
+        ids[..2]
+    );
+    let cursor = first.next_page.unwrap();
+    let resolution = format!("{}/v1/reorders/{}/resolution", f.origin, ids[0]);
+    let fulfilled = ResolveReorder {
+        status: ReorderResolution::Fulfilled,
+    };
+    assert_eq!(
+        f.client
+            .put(&resolution)
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-System-Actor", "ha:integration")
+            .header("If-Match", "\"1\"")
+            .json(&fulfilled)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (one, two) = tokio::join!(
+        f.client
+            .put(&resolution)
+            .bearer_auth(OWNER)
+            .header("If-Match", "\"1\"")
+            .json(&fulfilled)
+            .send(),
+        f.client
+            .put(&resolution)
+            .bearer_auth(OWNER)
+            .header("If-Match", "\"1\"")
+            .json(&ResolveReorder {
+                status: ReorderResolution::Dismissed
+            })
+            .send()
+    );
+    let one = one.unwrap();
+    let two = two.unwrap();
+    assert!([one.status(), two.status()].contains(&StatusCode::OK));
+    assert!([one.status(), two.status()].contains(&StatusCode::PRECONDITION_FAILED));
+    let resolved = if one.status() == StatusCode::OK {
+        one.json::<Reorder>().await.unwrap()
+    } else {
+        two.json::<Reorder>().await.unwrap()
+    };
+    assert_eq!(resolved.revision, 2);
+    assert!(resolved.resolved_at.is_some());
+    assert_eq!(resolved.resolved_by.as_ref().unwrap().key(), "system:owner");
+    let same_status = match resolved.status {
+        ReorderStatus::Fulfilled => ReorderResolution::Fulfilled,
+        ReorderStatus::Dismissed => ReorderResolution::Dismissed,
+        ReorderStatus::Pending => panic!("resolution remained pending"),
+    };
+    let repeated = f
+        .client
+        .put(&resolution)
+        .bearer_auth(OWNER)
+        .header("If-Match", "\"2\"")
+        .json(&ResolveReorder {
+            status: same_status,
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), StatusCode::OK);
+    assert_eq!(repeated.json::<Reorder>().await.unwrap(), resolved);
+    let other_status = match same_status {
+        ReorderResolution::Fulfilled => ReorderResolution::Dismissed,
+        ReorderResolution::Dismissed => ReorderResolution::Fulfilled,
+    };
+    assert_eq!(
+        f.client
+            .put(&resolution)
+            .bearer_auth(OWNER)
+            .header("If-Match", "\"2\"")
+            .json(&ResolveReorder {
+                status: other_status
+            })
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let next: Page<Reorder> = f
+        .client
+        .get(&list_url)
+        .bearer_auth(OWNER)
+        .query(&[("limit", "2"), ("page_token", cursor.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        next.items
+            .iter()
+            .map(|record| record.request.id)
+            .collect::<Vec<_>>(),
+        ids[2..4]
+    );
+    let final_page: Page<Reorder> = f
+        .client
+        .get(&list_url)
+        .bearer_auth(OWNER)
+        .query(&[
+            ("limit", "2"),
+            ("page_token", next.next_page.as_deref().unwrap()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(final_page.items[0].request.id, ids[4]);
+    assert!(final_page.next_page.is_none());
+    for query in [
+        vec![("status", "fulfilled"), ("page_token", cursor.as_str())],
+        vec![("limit", "0")],
+        vec![("limit", "201")],
+        vec![("page_token", "invalid")],
+        vec![("status", "unknown")],
+    ] {
+        assert_eq!(
+            f.client
+                .get(&list_url)
+                .bearer_auth(OWNER)
+                .query(&query)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    f.finish().await;
+}
+
+/// Own the real child even if an assertion fails, so tests never leave a server behind.
+struct BackendProcess(std::process::Child);
+impl BackendProcess {
+    async fn start(database: &std::path::Path, address: SocketAddr) -> Self {
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_home-maintenance"))
+            .args(["--bind", &address.to_string(), "--database"])
+            .arg(database)
+            .env("MAINTENANCE_API_TOKEN", OWNER)
+            .env("MAINTENANCE_INTEGRATION_TOKEN", INTEGRATION)
+            .env_remove("MAINTENANCE_INGRESS_BIND")
+            .env_remove("SUPERVISOR_TOKEN")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut process = Self(child);
+        let client = Client::new();
+        for _ in 0..100 {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "backend exited during startup"
+            );
+            if client
+                .get(format!("http://{address}/health"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return process;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("backend did not become ready");
+    }
+    fn crash(&mut self) {
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
+    }
+}
+impl Drop for BackendProcess {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test]
+async fn reorder_lost_response_survives_a_real_backend_process_crash_and_restart() {
+    use home_maintenance::models::{Reorder, ReorderReceipt};
+    use std::io::Write as _;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("process.sqlite3");
+    let store = Store::open(&database).await.unwrap();
+    let mut create = input("example-process-reorder");
+    create.definition.reorder_url = Some("https://example.invalid/replacement".into());
+    let actor = Actor::System {
+        id: home_maintenance::models::SystemActor::Owner,
+        name: "Owner credential".into(),
+    };
+    let item = store.create(create, &actor, "seed-process").await.unwrap();
+    store.close().await.unwrap();
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let mut process = BackendProcess::start(&database, address).await;
+    let mut connection = std::net::TcpStream::connect(address).unwrap();
+    write!(connection, "POST /v1/items/{}/reorders HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {INTEGRATION}\r\nX-Maintenance-System-Actor: ha:integration\r\nIf-Match: \"{}\"\r\nIdempotency-Key: lost-process-response\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}", item.id.as_ref(), item.revision).unwrap();
+    connection.flush().unwrap();
+    // The client never reads the response. Observe the transaction independently
+    // before killing the actual process, without relying on an in-memory Store.
+    let observer = Store::open(&database).await.unwrap();
+    let mut committed = None;
+    for _ in 0..100 {
+        let receipt: Option<String> = sqlx::query_scalar("SELECT receipt FROM reorders")
+            .fetch_optional(observer.pool())
+            .await
+            .unwrap();
+        if let Some(receipt) = receipt {
+            committed = Some(serde_json::from_str::<ReorderReceipt>(&receipt).unwrap());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let original = committed.expect("request was not committed");
+    drop(connection);
+    process.crash();
+    observer.close().await.unwrap();
+    let mut restarted = BackendProcess::start(&database, address).await;
+    let client = Client::new();
+    let response = client
+        .post(format!(
+            "http://{address}/v1/items/{}/reorders",
+            item.id.as_ref()
+        ))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .header("Idempotency-Key", "lost-process-response")
+        .json(&home_maintenance::models::ReorderItem::default())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(response.json::<ReorderReceipt>().await.unwrap(), original);
+    let page: Page<Reorder> = client
+        .get(format!("http://{address}/v1/reorders"))
+        .bearer_auth(INTEGRATION)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].request, original);
+    restarted.crash();
+}

@@ -15,12 +15,17 @@ from .models import ITEM_ID
 
 _UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 _CHECKLIST_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/checklist/{_UUID}")
+_REORDER_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/reorders")
 _ROUTES = (
     (re.compile(r"items"), frozenset({"GET", "POST"})),
     (re.compile(r"summary|system"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/events"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/completions"), frozenset({"POST"})),
+    (_REORDER_ROUTE, frozenset({"POST"})),
+    (re.compile(r"reorders"), frozenset({"GET"})),
+    (re.compile(rf"reorders/{_UUID}"), frozenset({"GET"})),
+    (re.compile(rf"reorders/{_UUID}/resolution"), frozenset({"PUT"})),
     (_CHECKLIST_ROUTE, frozenset({"PUT"})),
     (
         re.compile(rf"items/{ITEM_ID.pattern}/archive"),
@@ -29,6 +34,7 @@ _ROUTES = (
 )
 _LIST_QUERY = {"archived", "limit", "page_token"}
 _EVENT_QUERY = {"limit", "page_token"}
+_REORDER_QUERY = {"status", "limit", "page_token"}
 
 
 def loaded_coordinator(hass: HomeAssistant) -> MaintenanceCoordinator | None:
@@ -61,11 +67,15 @@ class MaintenanceView(HomeAssistantView):
                 allowed_query = _LIST_QUERY
             elif path.endswith("/events"):
                 allowed_query = _EVENT_QUERY
+            elif path == "reorders":
+                allowed_query = _REORDER_QUERY
         if len(request.query_string) > 4096 or request.query.keys() - allowed_query:
             raise web.HTTPBadRequest(reason="Unsupported query parameters")
         user = request["hass_user"]
         admin_only = request.method != "GET" and not (
-            path.endswith("/completions") or _CHECKLIST_ROUTE.fullmatch(path)
+            path.endswith("/completions")
+            or _CHECKLIST_ROUTE.fullmatch(path)
+            or _REORDER_ROUTE.fullmatch(path)
         )
         if admin_only and not user.is_admin:
             raise web.HTTPForbidden
@@ -106,8 +116,13 @@ class MaintenanceView(HomeAssistantView):
             raise web.HTTPGatewayTimeout from None
         except ClientError, ResponseTooLarge:
             raise web.HTTPBadGateway from None
-        if request.method != "GET" and response.status < 300:
-            # Let polling reconcile native counts without delaying the REST response.
+        if (
+            request.method != "GET"
+            and response.status < 300
+            and not _REORDER_ROUTE.fullmatch(path)
+            and not path.startswith("reorders/")
+        ):
+            # Reorders do not change the tasks used by native entities.
             entry = coordinator.config_entry
             if entry is not None:
                 entry.async_create_background_task(

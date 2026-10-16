@@ -6,7 +6,10 @@ use std::sync::Arc;
 async fn main() -> Result<()> {
     let config = Config::load()?;
     if let Some(path) = &config.openapi {
-        std::fs::write(path, serde_json::to_string_pretty(&api::openapi()?)?)?;
+        std::fs::write(
+            path,
+            format!("{}\n", serde_json::to_string_pretty(&api::openapi()?)?),
+        )?;
         return Ok(());
     }
     let logger = home_maintenance::logging::logger();
