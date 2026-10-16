@@ -15,7 +15,10 @@ from homeassistant.exceptions import (
     Unauthorized,
 )
 from homeassistant.helpers import intent
+from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.typing import WebSocketGenerator
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import DOMAIN, SUMMARY_KEYS
 
 from .conftest import (
@@ -28,10 +31,15 @@ from .conftest import (
 )
 
 
-async def test_native_sensors_and_todo_list(hass: HomeAssistant, entry) -> None:
+async def test_native_sensors_and_todo_list(
+    hass: HomeAssistant, entry: MaintenanceConfigEntry
+) -> None:
     for key in SUMMARY_KEYS:
-        assert hass.states.get(f"sensor.maintenance_{key}").state == str(SUMMARY[key])
+        state = hass.states.get(f"sensor.maintenance_{key}")
+        assert state is not None
+        assert state.state == str(SUMMARY[key])
     state = hass.states.get("todo.maintenance")
+    assert state is not None
     assert state.state == "1"
     # Only completion is supported, so definitions cannot be edited via todo.
     assert state.attributes["supported_features"] == 4
@@ -59,9 +67,90 @@ async def test_native_sensors_and_todo_list(hass: HomeAssistant, entry) -> None:
     }
 
 
+async def test_native_entities_follow_successive_snapshots(
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    """Counts, service reads, and subscriptions follow updated and empty lists."""
+    client = await hass_ws_client(hass)
+    await client.send_json(
+        {"id": 1, "type": "todo/item/subscribe", "entity_id": "todo.maintenance"}
+    )
+    assert (await client.receive_json())["success"]
+    assert (await client.receive_json())["event"]["items"][0]["uid"] == OCCURRENCE_ID
+
+    updated = item_record(
+        occurrence_id=NEXT_OCCURRENCE_ID,
+        revision=2,
+        summary="Service the example filter",
+        description="Use the example replacement.",
+        due="2026-10-17",
+    )
+    expected_items = [
+        {
+            "summary": "Service the example filter",
+            "uid": NEXT_OCCURRENCE_ID,
+            "status": "needs_action",
+            "due": "2026-10-17",
+            "description": (
+                "Use the example replacement.\n\n"
+                "Instructions\n1. Turn off the appliance\n2. Replace the filter"
+            ),
+        }
+    ]
+    for summary, records, expected in (
+        (
+            {"active": 1, "overdue": 0, "due_soon": 1, "completed": 4},
+            [updated],
+            expected_items,
+        ),
+        ({"active": 0, "overdue": 0, "due_soon": 0, "completed": 5}, [], []),
+    ):
+        backend.responses[("GET", "/v1/summary")] = (
+            200,
+            json.dumps(summary).encode(),
+            {},
+        )
+        backend.responses[("GET", "/v1/items")] = (
+            200,
+            json.dumps({"items": records, "next_page": None}).encode(),
+            {},
+        )
+        await entry.runtime_data.async_refresh()
+        await hass.async_block_till_done()
+        for key, value in summary.items():
+            state = hass.states.get(f"sensor.maintenance_{key}")
+            assert state is not None
+            assert state.state == str(value)
+        state = hass.states.get("todo.maintenance")
+        assert state is not None
+        assert state.state == str(len(expected))
+        result = await hass.services.async_call(
+            "todo",
+            "get_items",
+            {"entity_id": "todo.maintenance"},
+            blocking=True,
+            return_response=True,
+        )
+        assert result == {"todo.maintenance": {"items": expected}}
+        async with asyncio.timeout(5):
+            changed = await client.receive_json()
+        assert changed == {
+            "id": 1,
+            "type": "event",
+            "event": {"items": [{**item, "completed": None} for item in expected]},
+        }
+
+
 @pytest.mark.parametrize("native_todo", [False, True], ids=["action", "todo"])
 async def test_completion_has_authenticated_human_context(
-    hass: HomeAssistant, hass_user, entry, backend: Backend, native_todo: bool
+    hass: HomeAssistant,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    native_todo: bool,
 ) -> None:
     backend.responses[("POST", f"/v1/items/{ITEM_ID}/completions")] = (
         200,
@@ -108,7 +197,7 @@ async def test_completion_has_authenticated_human_context(
 
 
 async def test_no_user_completion_has_explicit_system_attribution(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     await hass.services.async_call(
         DOMAIN,
@@ -132,7 +221,7 @@ async def test_no_user_completion_has_explicit_system_attribution(
 
 
 async def test_unknown_user_cannot_become_system_actor(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     before = len(backend.requests)
     with pytest.raises(Unauthorized):
@@ -148,7 +237,7 @@ async def test_unknown_user_cannot_become_system_actor(
 
 @pytest.mark.parametrize("status", [409, 412])
 async def test_conflict_does_not_retry_or_complete_the_next_occurrence(
-    hass: HomeAssistant, entry, backend: Backend, status: int
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend, status: int
 ) -> None:
     backend.responses[("POST", f"/v1/items/{ITEM_ID}/completions")] = (
         status,
@@ -173,7 +262,10 @@ async def test_conflict_does_not_retry_or_complete_the_next_occurrence(
     "change", [{"rename": "Forged edit"}, {"status": "needs_action"}]
 )
 async def test_todo_cannot_edit_or_reopen_backend_definitions(
-    hass: HomeAssistant, entry, backend: Backend, change: dict[str, str]
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    change: dict[str, str],
 ) -> None:
     before = len(backend.requests)
     with pytest.raises(ServiceValidationError, match="Only completion"):
@@ -187,12 +279,16 @@ async def test_todo_cannot_edit_or_reopen_backend_definitions(
 
 
 async def test_entities_unload_and_actions_stay_registered(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     assert await hass.config_entries.async_unload(entry.entry_id)
-    assert hass.states.get("todo.maintenance").state == "unavailable"
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "unavailable"
     for key in SUMMARY_KEYS:
-        assert hass.states.get(f"sensor.maintenance_{key}").state == "unavailable"
+        state = hass.states.get(f"sensor.maintenance_{key}")
+        assert state is not None
+        assert state.state == "unavailable"
     with pytest.raises(ServiceValidationError, match="not loaded"):
         await hass.services.async_call(
             DOMAIN,
@@ -203,7 +299,10 @@ async def test_entities_unload_and_actions_stay_registered(
 
 
 async def test_actual_assist_completion_accepts_partial_item_without_stale_actor(
-    hass: HomeAssistant, hass_user, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """Assist omits optional fields and does not forward an entity user context."""
     successor = item_record(occurrence_id=NEXT_OCCURRENCE_ID, revision=2)
@@ -247,7 +346,10 @@ async def test_actual_assist_completion_accepts_partial_item_without_stale_actor
 
 
 async def test_assist_does_not_inherit_a_native_read_user(
-    hass: HomeAssistant, hass_user, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """Core assigns entity context to reads too, with no mutation to consume it."""
     await hass.services.async_call(
@@ -273,7 +375,11 @@ async def test_assist_does_not_inherit_a_native_read_user(
 
 
 async def test_concurrent_native_completions_keep_each_users_identity(
-    hass: HomeAssistant, hass_user, hass_admin_user, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_user: MockUser,
+    hass_admin_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """Core's shared entity must not exchange actors between service tasks."""
     second_item = item_record(item_id="second-filter", occurrence_id=NEXT_OCCURRENCE_ID)

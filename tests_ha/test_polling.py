@@ -5,8 +5,10 @@ import json
 import pytest
 from aiohttp import web
 from homeassistant.core import HomeAssistant
+from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
     CONF_BACKEND_URL,
     CONF_TOKEN,
@@ -17,12 +19,13 @@ from .conftest import (
     NEXT_OCCURRENCE_ID,
     SUMMARY,
     Backend,
+    entity_items,
     item_record,
 )
 
 
 async def test_native_entities_follow_the_entire_inventory(
-    hass: HomeAssistant, aiohttp_server, socket_enabled
+    hass: HomeAssistant, aiohttp_server: AiohttpServer, socket_enabled: None
 ) -> None:
     requests: list[dict[str, str]] = []
 
@@ -64,7 +67,9 @@ async def test_native_entities_follow_the_entire_inventory(
         "replace-filter",
         "second-filter",
     }
-    assert hass.states.get("todo.maintenance").state == "2"
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "2"
     calendar = await hass.services.async_call(
         "calendar",
         "get_events",
@@ -77,7 +82,8 @@ async def test_native_entities_follow_the_entire_inventory(
         return_response=True,
     )
     assert {
-        event["summary"] for event in calendar["calendar.maintenance"]["events"]
+        event["summary"]
+        for event in entity_items(calendar, "calendar.maintenance", "events")
     } == {
         "Replace filter",
         "Example second filter",
@@ -108,7 +114,10 @@ async def test_native_entities_follow_the_entire_inventory(
     ],
 )
 async def test_invalid_page_preserves_previous_snapshot_and_marks_unavailable(
-    hass: HomeAssistant, entry, backend: Backend, page: dict[str, object]
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    page: dict[str, object],
 ) -> None:
     previous = entry.runtime_data.data
     backend.responses[("GET", "/v1/items")] = (200, json.dumps(page).encode(), {})
@@ -116,12 +125,14 @@ async def test_invalid_page_preserves_previous_snapshot_and_marks_unavailable(
     await hass.async_block_till_done()
     assert not entry.runtime_data.last_update_success
     assert entry.runtime_data.data == previous
-    assert hass.states.get("todo.maintenance").state == "unavailable"
-    assert hass.states.get("calendar.maintenance").state == "unavailable"
+    for entity_id in ("todo.maintenance", "calendar.maintenance"):
+        state = hass.states.get(entity_id)
+        assert state is not None
+        assert state.state == "unavailable"
 
 
 async def test_partial_inventory_auth_failure_requests_reauthentication(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     previous = entry.runtime_data.data
     backend.responses[("GET", "/v1/items")] = (401, b"{}", {})

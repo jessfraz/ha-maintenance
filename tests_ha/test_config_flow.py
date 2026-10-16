@@ -16,8 +16,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
+from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
@@ -111,7 +113,9 @@ async def test_only_integration_token_is_adapter_credential(
     assert result["errors"] == {"base": "integration_required"}
 
 
-async def test_single_backend(hass: HomeAssistant, entry) -> None:
+async def test_single_backend(
+    hass: HomeAssistant, entry: MaintenanceConfigEntry
+) -> None:
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -120,7 +124,7 @@ async def test_single_backend(hass: HomeAssistant, entry) -> None:
 
 
 async def test_reauth_updates_existing_entry(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
@@ -171,7 +175,12 @@ class SupervisorDiscovery:
 
 
 @pytest.fixture
-async def supervisor(hass: HomeAssistant, aiohttp_server, socket_enabled, monkeypatch):
+async def supervisor(
+    hass: HomeAssistant,
+    aiohttp_server: AiohttpServer,
+    socket_enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SupervisorDiscovery:
     state = SupervisorDiscovery()
     app = web.Application()
     app.router.add_get("/discovery", state.handle)
@@ -201,7 +210,9 @@ async def test_discovery_requires_confirmation_before_contact_or_save(
     )
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "hassio_confirm"
-    assert result["data_schema"].schema == {}
+    schema = result["data_schema"]
+    assert schema is not None
+    assert schema.schema == {}
     assert not backend.requests
     assert not hass.config_entries.async_entries(DOMAIN)
     assert info.config[CONF_TOKEN] not in str(result)
@@ -402,7 +413,9 @@ async def test_app_reauth_discovers_replacement_without_token_form(
         data=existing.data,
     )
     assert result["step_id"] == "hassio_confirm"
-    assert result["data_schema"].schema == {}
+    schema = result["data_schema"]
+    assert schema is not None
+    assert schema.schema == {}
     assert not backend.requests
     assert existing.data[CONF_TOKEN] == "old-token"
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})

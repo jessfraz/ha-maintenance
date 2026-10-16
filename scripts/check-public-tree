@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -252,7 +253,7 @@ def inspect(path: str, data: bytes, private: tuple[bytes, ...]) -> set[str]:
     return categories
 
 
-def worktree(root: Path):
+def worktree(root: Path) -> Iterator[tuple[str, bytes]]:
     for directory, children, filenames in os.walk(root, followlinks=False):
         children[:] = [name for name in children if name not in BUILD_DIRECTORIES]
         for filename in filenames:
@@ -264,7 +265,7 @@ def worktree(root: Path):
                 yield relative, path.read_bytes()
 
 
-def history():
+def history() -> Iterator[tuple[str, bytes]]:
     # --all includes every ref. rev-list deduplicates objects, so its single
     # display path is insufficient for filename bans: one blob can have both
     # public and forbidden names. Enumerate tree entries separately below.

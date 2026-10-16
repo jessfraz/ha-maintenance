@@ -1,8 +1,10 @@
 """Maintenance counts exposed as native sensors."""
 
+from typing import override
+
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -43,7 +45,19 @@ class MaintenanceCountSensor(CoordinatorEntity[MaintenanceCoordinator], SensorEn
             model="Maintenance registry",
         )
 
-    @property
-    def native_value(self) -> int:
-        """Return the last coordinated value."""
-        return self.coordinator.data.summary[self.entity_description.key]
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Initialize from the latest snapshot after registering the listener."""
+        await super().async_added_to_hass()
+        self._attr_native_value = self.coordinator.data.summary[
+            self.entity_description.key
+        ]
+
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Update HA's native value before publishing its state."""
+        self._attr_native_value = self.coordinator.data.summary[
+            self.entity_description.key
+        ]
+        super()._handle_coordinator_update()

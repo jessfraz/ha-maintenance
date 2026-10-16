@@ -6,7 +6,10 @@ Python projects that contract into Home Assistant. Use the existing routes,
 entity patterns, and test fixtures before adding new abstractions.
 
 Use the Nix dev shell and the declared Cargo and uv lockfiles. Run `just check`
-and the checks appropriate to your change. Container changes also need
+and the checks appropriate to your change. Python uses uv, Ruff lint/format,
+and ty; the same checks run locally and in CI. Annotate function parameters
+and returns, and narrow optional or untrusted values before using them.
+Container changes also need
 `just container`; CI tests native amd64 and arm64 images. New database queries
 need representative SQLite `EXPLAIN` evidence. Completion changes need real
 HTTP/SQLite tests for retries, concurrent mutations, and durable history.

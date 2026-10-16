@@ -9,17 +9,20 @@ from unittest.mock import AsyncMock
 import pytest
 from aiohasupervisor import SupervisorClient
 from aiohttp import web
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
+from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
     CONF_ADDON_SLUG,
     CONF_BACKEND_URL,
@@ -27,7 +30,7 @@ from custom_components.home_maintenance.const import (
     DOMAIN,
 )
 
-from .conftest import Backend
+from .conftest import Backend, ReceivedRequest
 
 APP_SLUG = "testrepo_home_maintenance"
 PRESENCE_PATH = "/v1/integration/presence"
@@ -56,7 +59,12 @@ class BackupInventory:
 
 
 @pytest.fixture
-async def inventory(hass: HomeAssistant, aiohttp_server, socket_enabled, monkeypatch):
+async def inventory(
+    hass: HomeAssistant,
+    aiohttp_server: AiohttpServer,
+    socket_enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> BackupInventory:
     state = BackupInventory()
     app = web.Application()
     app.router.add_get("/backups/info", state.handle)
@@ -104,7 +112,7 @@ async def setup_paired(hass: HomeAssistant, backend: Backend) -> MockConfigEntry
     return entry
 
 
-def check_ins(backend: Backend):
+def check_ins(backend: Backend) -> list[ReceivedRequest]:
     return [request for request in backend.requests if request.path == PRESENCE_PATH]
 
 
@@ -113,7 +121,7 @@ async def test_loaded_presence_contains_only_matching_backup_coverage(
     hass: HomeAssistant,
     backend: Backend,
     inventory: BackupInventory,
-    freezer,
+    freezer: FrozenDateTimeFactory,
     status: str,
 ) -> None:
     now = datetime(2026, 10, 15, 1, 0, tzinfo=UTC)
@@ -183,7 +191,7 @@ async def test_periodic_poll_reports_but_unloaded_entry_stops(
 
 
 async def test_failed_entity_setup_does_not_claim_loaded(
-    hass: HomeAssistant, backend: Backend, monkeypatch
+    hass: HomeAssistant, backend: Backend, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend.responses[("POST", PRESENCE_PATH)] = (204, b"", {})
     monkeypatch.setattr(
@@ -246,7 +254,7 @@ async def test_unavailable_backups_are_reported_honestly(
     hass: HomeAssistant,
     backend: Backend,
     inventory: BackupInventory,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
     if failure == "http":
@@ -268,7 +276,10 @@ async def test_unavailable_backups_are_reported_honestly(
 
 
 async def test_standalone_does_not_report_app_presence(
-    hass: HomeAssistant, backend: Backend, entry, inventory: BackupInventory
+    hass: HomeAssistant,
+    backend: Backend,
+    entry: MaintenanceConfigEntry,
+    inventory: BackupInventory,
 ) -> None:
     await entry.runtime_data.async_refresh()
     assert not check_ins(backend)
@@ -292,7 +303,10 @@ async def test_unload_during_backup_lookup_cancels_pending_presence(
 
 
 async def test_old_full_backup_cannot_promote_new_app_only_backup(
-    hass: HomeAssistant, backend: Backend, inventory: BackupInventory, freezer
+    hass: HomeAssistant,
+    backend: Backend,
+    inventory: BackupInventory,
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     paired = datetime(2026, 10, 14, 1, 0, tzinfo=UTC)
     freezer.move_to(paired)

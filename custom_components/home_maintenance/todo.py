@@ -71,10 +71,22 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
         if self._service_context.get() is not None:
             self._service_context.set(context)
 
-    @property
-    def todo_items(self) -> list[TodoItem]:
+    @override
+    async def async_added_to_hass(self) -> None:
+        """Initialize from the latest snapshot after registering the listener."""
+        await super().async_added_to_hass()
+        self._update_todo_items()
+
+    @callback
+    @override
+    def _handle_coordinator_update(self) -> None:
+        """Publish the coordinated items through HA's native attribute."""
+        self._update_todo_items()
+        super()._handle_coordinator_update()
+
+    def _update_todo_items(self) -> None:
         """An occurrence UID changes when the backend schedules its successor."""
-        return [
+        self._attr_todo_items = [
             TodoItem(
                 uid=str(item.occurrence_id),
                 summary=item.summary,

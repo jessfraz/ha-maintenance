@@ -7,7 +7,10 @@ import probatio as vol
 import pytest
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import DOMAIN
 from custom_components.home_maintenance.models import MaintenanceItem
 
@@ -39,7 +42,7 @@ def checklist_step(
 
 
 async def test_native_todo_uses_summary_and_shows_details_and_step_progress(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     record = item_record(
         summary="Service the appliance",
@@ -64,7 +67,9 @@ async def test_native_todo_uses_summary_and_shows_details_and_step_progress(
         blocking=True,
         return_response=True,
     )
-    assert hass.states.get("todo.maintenance").state == "1"
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "1"
     assert result == {
         "todo.maintenance": {
             "items": [
@@ -88,8 +93,13 @@ async def test_native_todo_uses_summary_and_shows_details_and_step_progress(
 
 @pytest.mark.parametrize("human", [True, False], ids=["human", "automation"])
 async def test_step_action_preserves_parent_and_uses_trusted_context(
-    hass: HomeAssistant, hass_user, entry, backend: Backend, human: bool
+    hass: HomeAssistant,
+    hass_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    human: bool,
 ) -> None:
+    assert hass_user.name is not None
     actor = {
         "kind": "user" if human else "system",
         "id": f"ha:{hass_user.id}" if human else "ha:automation",
@@ -143,11 +153,12 @@ async def test_step_action_preserves_parent_and_uses_trusted_context(
     )
     parsed = MaintenanceItem.parse(record)
     assert parsed.occurrence_id == UUID(OCCURRENCE_ID)
+    assert parsed.checklist[0].completion is not None
     assert parsed.checklist[0].completion.actor.id == actor["id"]
 
 
 async def test_clear_step_uses_false_without_advancing_the_parent(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     record = item_record(revision=3, checklist=[checklist_step()])
     backend.responses[("PUT", f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}")] = (
@@ -168,6 +179,7 @@ async def test_clear_step_uses_false_without_advancing_the_parent(
         blocking=True,
         return_response=True,
     )
+    assert result is not None
     assert result["completed"] is False
     assert result["occurrence_id"] == OCCURRENCE_ID
     forwarded = next(request for request in backend.requests if request.method == "PUT")
@@ -180,7 +192,7 @@ async def test_clear_step_uses_false_without_advancing_the_parent(
 
 @pytest.mark.parametrize("status", [409, 412])
 async def test_step_conflicts_never_retry_against_a_new_parent(
-    hass: HomeAssistant, entry, backend: Backend, status: int
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend, status: int
 ) -> None:
     backend.responses[("PUT", f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}")] = (
         status,
@@ -215,7 +227,10 @@ async def test_step_conflicts_never_retry_against_a_new_parent(
     ],
 )
 async def test_step_action_rejects_invalid_or_untrusted_service_data(
-    hass: HomeAssistant, entry, backend: Backend, change: dict[str, object]
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    change: dict[str, object],
 ) -> None:
     before = len(backend.requests)
     with pytest.raises((ServiceValidationError, vol.Invalid)):
@@ -235,7 +250,11 @@ async def test_step_action_rejects_invalid_or_untrusted_service_data(
 
 
 async def test_proxy_allows_real_step_updates_and_overrides_forged_actor_headers(
-    hass_client, hass_user, hass_user_token, entry, backend: Backend
+    hass_client: ClientSessionGenerator,
+    hass_user: MockUser,
+    hass_user_token: str,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     client = await hass_client(hass_user_token)
     response = await client.put(
@@ -268,7 +287,12 @@ async def test_proxy_allows_real_step_updates_and_overrides_forged_actor_headers
     ],
 )
 async def test_checklist_proxy_preserves_route_method_and_query_allowlists(
-    hass_client, entry, backend: Backend, method: str, suffix: str, status: int
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    method: str,
+    suffix: str,
+    status: int,
 ) -> None:
     client = await hass_client()
     before = len(backend.requests)

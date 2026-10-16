@@ -4,16 +4,33 @@ import asyncio
 import json
 
 import pytest
+from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from pytest_homeassistant_custom_component.typing import (
+    ClientSessionGenerator,
+    WebSocketGenerator,
+)
 
-from .conftest import NEXT_OCCURRENCE_ID, OCCURRENCE_ID, Backend, item_record
+from custom_components.home_maintenance import MaintenanceConfigEntry
+
+from .conftest import (
+    NEXT_OCCURRENCE_ID,
+    OCCURRENCE_ID,
+    Backend,
+    entity_items,
+    item_record,
+)
 
 
 async def test_due_task_is_an_all_day_calendar_event(
-    hass: HomeAssistant, hass_client, hass_user_token, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """Ordinary household users can read dates without accessing the dashboard."""
     client = await hass_client(hass_user_token)
@@ -68,8 +85,8 @@ async def test_due_task_is_an_all_day_calendar_event(
 )
 async def test_calendar_windows_use_local_dates_and_exclusive_bounds(
     hass: HomeAssistant,
-    hass_client,
-    entry,
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
     backend: Backend,
     due: str,
     start: str,
@@ -96,7 +113,7 @@ async def test_calendar_windows_use_local_dates_and_exclusive_bounds(
 
 
 async def test_calendar_sorts_ties_and_omits_archived_tasks(
-    hass: HomeAssistant, entry, backend: Backend
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
     """API order is deterministic even when multiple tasks share a date."""
     records = [
@@ -129,7 +146,10 @@ async def test_calendar_sorts_ties_and_omits_archived_tasks(
         blocking=True,
         return_response=True,
     )
-    assert [event["summary"] for event in result["calendar.maintenance"]["events"]] == [
+    assert [
+        event["summary"]
+        for event in entity_items(result, "calendar.maintenance", "events")
+    ] == [
         "Example alpha",
         "Example zeta",
     ]
@@ -149,7 +169,10 @@ async def test_calendar_sorts_ties_and_omits_archived_tasks(
 
 @pytest.mark.freeze_time("2026-11-01T03:30:00Z")
 async def test_current_event_advances_at_local_midnight(
-    hass: HomeAssistant, entry, backend: Backend, freezer
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
 ) -> None:
     """Past due dates stay in the past; HA advances its current/next event."""
     await hass.config.async_set_time_zone("America/New_York")
@@ -179,6 +202,7 @@ async def test_current_event_advances_at_local_midnight(
     )
     await entry.runtime_data.async_refresh()
     state = hass.states.get("calendar.maintenance")
+    assert state is not None
     assert state.state == "on"
     assert state.attributes["message"] == "Example current task"
     for instant, message in [
@@ -190,13 +214,17 @@ async def test_current_event_advances_at_local_midnight(
         async_fire_time_changed(hass, dt_util.utcnow())
         await hass.async_block_till_done(wait_background_tasks=True)
         state = hass.states.get("calendar.maintenance")
+        assert state is not None
         assert state.state == ("on" if message else "off")
         assert state.attributes.get("message") == message
 
 
 @pytest.mark.freeze_time("2026-10-15T12:00:00Z")
 async def test_calendar_subscription_updates_when_a_later_task_changes(
-    hass: HomeAssistant, hass_ws_client, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_ws_client: WebSocketGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """Calendar cards refresh even when the first event's state stays identical."""
     current = item_record()
@@ -210,6 +238,7 @@ async def test_calendar_subscription_updates_when_a_later_task_changes(
     )
     await entry.runtime_data.async_refresh()
     previous = hass.states.get("calendar.maintenance")
+    assert previous is not None
     client = await hass_ws_client(hass)
     await client.send_json(
         {
@@ -245,24 +274,32 @@ async def test_calendar_subscription_updates_when_a_later_task_changes(
     assert event["location"] == "Example utility room"
     assert "Use the example replacement part." in event["description"]
     state = hass.states.get("calendar.maintenance")
+    assert state is not None
     assert state.state == previous.state
     assert state.attributes == previous.attributes
 
 
 async def test_calendar_outage_recovery_empty_inventory_and_unload(
-    hass: HomeAssistant, hass_client, entry, backend: Backend
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
 ) -> None:
     """An outage cannot masquerade as a successful empty or stale schedule."""
     client = await hass_client()
     params = {"start": "2026-10-15T00:00:00Z", "end": "2026-10-17T00:00:00Z"}
     backend.responses[("GET", "/v1/items")] = (503, b"{}", {})
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("calendar.maintenance").state == "unavailable"
+    state = hass.states.get("calendar.maintenance")
+    assert state is not None
+    assert state.state == "unavailable"
     response = await client.get("/api/calendars/calendar.maintenance", params=params)
     assert response.status == 500
     del backend.responses[("GET", "/v1/items")]
     await entry.runtime_data.async_refresh()
-    assert hass.states.get("calendar.maintenance").state != "unavailable"
+    state = hass.states.get("calendar.maintenance")
+    assert state is not None
+    assert state.state != "unavailable"
     response = await client.get("/api/calendars/calendar.maintenance", params=params)
     assert len(await response.json()) == 1
     backend.responses[("GET", "/v1/items")] = (
@@ -273,8 +310,12 @@ async def test_calendar_outage_recovery_empty_inventory_and_unload(
     await entry.runtime_data.async_refresh()
     response = await client.get("/api/calendars/calendar.maintenance", params=params)
     assert await response.json() == []
-    assert hass.states.get("calendar.maintenance").state == "off"
+    state = hass.states.get("calendar.maintenance")
+    assert state is not None
+    assert state.state == "off"
     assert await hass.config_entries.async_unload(entry.entry_id)
-    assert hass.states.get("calendar.maintenance").state == "unavailable"
+    state = hass.states.get("calendar.maintenance")
+    assert state is not None
+    assert state.state == "unavailable"
     response = await client.get("/api/calendars/calendar.maintenance", params=params)
     assert response.status == 400
