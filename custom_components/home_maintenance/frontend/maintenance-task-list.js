@@ -15,6 +15,7 @@
     const view = value.view ?? "upcoming";
     const days = value.days ?? 14;
     const limit = value.limit ?? 20;
+    const hideWhenEmpty = value.hide_when_empty === undefined ? false : value.hide_when_empty;
     if (typeof title !== "string" || !title.trim() || title.length > 200)
       throw new Error("Maintenance title must contain 1–200 characters.");
     if (!VIEWS.has(view)) throw new Error("Unknown Maintenance view.");
@@ -22,12 +23,15 @@
       throw new Error("Maintenance days must be between 1 and 365.");
     if (!Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new Error("Maintenance limit must be between 1 and 100.");
-    return { title: title.trim(), view, days, limit };
+    if (typeof hideWhenEmpty !== "boolean")
+      throw new Error("Maintenance hide_when_empty must be a boolean.");
+    return { title: title.trim(), view, days, limit, hideWhenEmpty };
   }
 
   function validateResponse(data) {
     if (!data || !Array.isArray(data.items) || data.items.length > 100 ||
-      !Number.isInteger(data.total) || data.total < data.items.length ||
+      !Number.isSafeInteger(data.total) || data.total < data.items.length ||
+      (data.total > 0 && data.items.length === 0) ||
       typeof data.can_open !== "boolean" ||
       !(data.app_path === null || /^\/app\/[a-zA-Z0-9_-]+\/$/.test(data.app_path)))
       throw new Error("Invalid Maintenance response.");
@@ -66,6 +70,7 @@
 
   const STYLES = `
     :host { display: block; }
+    :host([hidden]) { display: none; }
     ha-card { overflow: hidden; }
     .heading { display: flex; align-items: center; justify-content: space-between;
       gap: 16px; padding: 20px 20px 12px; }
@@ -105,6 +110,9 @@
       this._request = 0;
       this._pending = null;
       this._timer = null;
+      this._preview = false;
+      // Home Assistant must keep polling cards connected when their layout slot hides.
+      this.connectedWhileHidden = true;
       this._visibilityChanged = () => {
         if (!document.hidden) void this.refresh();
       };
@@ -112,6 +120,15 @@
 
     static getStubConfig() {
       return { title: "Maintenance upcoming", view: "upcoming", days: 14 };
+    }
+
+    set preview(value) {
+      this._preview = Boolean(value);
+      this._render();
+    }
+
+    get preview() {
+      return this._preview;
     }
 
     setConfig(value) {
@@ -144,6 +161,7 @@
     }
 
     getCardSize() {
+      if (this.hidden) return 0;
       return 1 + Math.max(1, this._data?.items.length ?? 3);
     }
 
@@ -199,6 +217,15 @@
     }
 
     _render() {
+      const hide = this._config.hideWhenEmpty && !this._preview &&
+        this._pending === null && !this._error && this._data?.total === 0;
+      if (this.hidden !== hide) {
+        this.hidden = hide;
+        // Hide HA's wrapper as well, so section grids and stacks leave no gap.
+        this.dispatchEvent(new CustomEvent("card-visibility-changed", {
+          bubbles: true, composed: true, detail: { value: !hide },
+        }));
+      }
       const focused = this.shadowRoot.activeElement;
       const focusedItem = focused?.dataset.itemId;
       const refreshFocused = focused?.dataset.refresh === "true";

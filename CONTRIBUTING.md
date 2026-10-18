@@ -9,6 +9,8 @@ Use the Nix dev shell and the declared Cargo and uv lockfiles. Run `just check`
 and the checks appropriate to your change. Python uses uv, Ruff lint/format,
 and ty; the same checks run locally and in CI. Annotate function parameters
 and returns, and narrow optional or untrusted values before using them.
+`just ha` also installs Chromium for Playwright and tests the dashboard card
+in a real browser. CI installs its Linux system dependencies too.
 Container changes also need
 `just container`; CI tests native amd64 and arm64 images. New database queries
 need representative SQLite `EXPLAIN` evidence. Completion changes need real

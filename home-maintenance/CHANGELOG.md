@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.0
+
+- Add an optional `hide_when_empty` setting to the task-list card. Empty queues release their layout space and keep refreshing.
+- Keep loading, errors, invalid responses, and editor previews visible.
+- Cover dashboard visibility transitions in Chromium and 30-day boundaries in the native card API.
+
 ## 0.9.0
 
 - Add Home Assistant's native diagnostics download with safe operational metadata and aggregate counts.

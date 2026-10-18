@@ -128,6 +128,191 @@ async def test_card_projects_current_status_and_item_local_dates(
     assert "test-integration-token" not in await response.text()
 
 
+async def test_thirty_day_upcoming_is_empty_despite_outside_and_undated_active_work(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_admin_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    """An empty selected window is independent of the active inventory size."""
+    freezer.move_to("2026-10-18T12:00:00Z")
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps(
+            {
+                "items": [
+                    item_record(
+                        item_id="example-outside-window",
+                        occurrence_id=f"{1:032x}",
+                        due="2026-11-18",
+                    ),
+                    item_record(
+                        item_id="example-undated-active",
+                        occurrence_id=f"{2:032x}",
+                        due=None,
+                        schedule_kind="standing",
+                    ),
+                ],
+                "next_page": None,
+            }
+        ).encode(),
+        {},
+    )
+    refresh_token = await hass.auth.async_create_refresh_token(
+        hass_admin_user, client_id="https://example.invalid"
+    )
+    client = await hass_client(hass.auth.async_create_access_token(refresh_token))
+    upcoming = await client.get(CARD_PATH + "?view=upcoming&days=30&limit=1")
+    assert upcoming.status == 200
+    report = await upcoming.json()
+    assert report["total"] == 0
+    assert report["items"] == []
+    active = await client.get(CARD_PATH + "?view=active&days=30")
+    assert active.status == 200
+    report = await active.json()
+    assert report["total"] == 2
+    assert [item["id"] for item in report["items"]] == [
+        "example-outside-window",
+        "example-undated-active",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("instant", "timezone", "day_thirty", "day_thirty_one"),
+    [
+        (
+            "2026-10-18T06:30:00Z",
+            "America/Vancouver",
+            "2026-11-16",
+            "2026-11-17",
+        ),
+        (
+            "2026-10-18T23:30:00Z",
+            "Asia/Tokyo",
+            "2026-11-18",
+            "2026-11-19",
+        ),
+        (
+            "2026-02-07T08:30:00Z",
+            "America/Vancouver",
+            "2026-03-09",
+            "2026-03-10",
+        ),
+        (
+            "2026-10-03T06:30:00Z",
+            "America/Vancouver",
+            "2026-11-01",
+            "2026-11-02",
+        ),
+    ],
+    ids=["west-behind-utc", "east-ahead-of-utc", "spring-dst", "fall-dst"],
+)
+async def test_thirty_day_upcoming_includes_day_thirty_and_excludes_day_thirty_one(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_admin_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
+    instant: str,
+    timezone: str,
+    day_thirty: str,
+    day_thirty_one: str,
+) -> None:
+    """The inclusive cutoff follows the task's calendar, including DST changes."""
+    freezer.move_to(instant)
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps(
+            {
+                "items": [
+                    item_record(
+                        item_id="example-day-thirty-one",
+                        occurrence_id=f"{1:032x}",
+                        due=day_thirty_one,
+                        timezone=timezone,
+                    ),
+                    item_record(
+                        item_id="example-day-thirty",
+                        occurrence_id=f"{2:032x}",
+                        due=day_thirty,
+                        timezone=timezone,
+                    ),
+                ],
+                "next_page": None,
+            }
+        ).encode(),
+        {},
+    )
+    refresh_token = await hass.auth.async_create_refresh_token(
+        hass_admin_user, client_id="https://example.invalid"
+    )
+    client = await hass_client(hass.auth.async_create_access_token(refresh_token))
+    response = await client.get(CARD_PATH + "?view=upcoming&days=30&limit=1")
+    assert response.status == 200
+    report = await response.json()
+    assert report["total"] == 1
+    assert [item["id"] for item in report["items"]] == ["example-day-thirty"]
+    assert report["items"][0]["due"] == day_thirty
+    assert report["items"][0]["timezone"] == timezone
+
+
+@pytest.mark.parametrize(
+    ("instant", "due"),
+    [
+        ("2026-10-18T06:30:00Z", "2026-10-17"),
+        ("2026-10-18T23:30:00Z", "2026-10-18"),
+    ],
+    ids=["west-local-today-before-utc-date", "east-local-today-after-utc-date"],
+)
+async def test_thirty_day_upcoming_starts_on_each_tasks_local_today(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_admin_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
+    instant: str,
+    due: str,
+) -> None:
+    """The same due date can be current in the west and overdue in the east."""
+    freezer.move_to(instant)
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps(
+            {
+                "items": [
+                    item_record(
+                        item_id="example-west-today",
+                        occurrence_id=f"{1:032x}",
+                        due=due,
+                        timezone="America/Vancouver",
+                    ),
+                    item_record(
+                        item_id="example-east-overdue",
+                        occurrence_id=f"{2:032x}",
+                        due=due,
+                        timezone="Asia/Tokyo",
+                    ),
+                ],
+                "next_page": None,
+            }
+        ).encode(),
+        {},
+    )
+    refresh_token = await hass.auth.async_create_refresh_token(
+        hass_admin_user, client_id="https://example.invalid"
+    )
+    client = await hass_client(hass.auth.async_create_access_token(refresh_token))
+    response = await client.get(CARD_PATH + "?view=upcoming&days=30")
+    assert response.status == 200
+    report = await response.json()
+    assert report["total"] == 1
+    assert [item["id"] for item in report["items"]] == ["example-west-today"]
+
+
 async def test_card_authentication_open_permissions_and_unload(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,

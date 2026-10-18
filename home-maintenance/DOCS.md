@@ -144,6 +144,23 @@ the chosen number of days, using each task's time zone. Undated tasks appear in
 Active. Archived tasks and standing instructions are excluded. `days` accepts
 1–365 and `limit` accepts 1–100; defaults are Upcoming, 14 days, and 20 tasks.
 
+To hide an empty upcoming queue, put its heading inside the card:
+
+```yaml
+type: custom:maintenance-task-list
+title: Work queue
+view: upcoming
+days: 30
+hide_when_empty: true
+```
+
+`hide_when_empty` defaults to `false`. It hides the card and its layout space
+only after a successful response confirms zero matching tasks. Refreshes
+continue while hidden, so new tasks bring it back. Loading, errors, invalid
+responses, and editor previews remain visible. Keep overdue warnings and app
+navigation outside this card; the active-task sensor includes work beyond the
+selected window and cannot determine whether this queue is empty.
+
 The card reads current status and due dates from the app when it loads, every
 minute, and when **Refresh** is pressed. It registers its JavaScript resource
 automatically. Update both the app and integration, restart Home Assistant,
@@ -256,7 +273,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.9.0
+  ghcr.io/jessfraz/ha-maintenance:0.10.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

@@ -1,6 +1,6 @@
 [project]
 name = "home-maintenance-home-assistant"
-version = "0.9.0"
+version = "0.10.0"
 description = "Home Assistant adapter for the Maintenance service"
 requires-python = ">=3.14.2"
 license = "MIT"
@@ -11,6 +11,7 @@ dev = [
   "gazetteer-matcher==1.1.0",
   "hassil==3.12.1",
   "home-assistant-intents==2026.10.6",
+  "playwright==1.64.0",
   "pytest-homeassistant-custom-component==0.13.372",
   "ruff==0.17.0",
   "ty==0.0.89",
@@ -19,7 +20,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests_ha"]
+testpaths = ["tests_ha", "tests_frontend"]
 addopts = "--strict-markers"
 
 [tool.ruff]
