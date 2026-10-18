@@ -9,9 +9,11 @@ import pytest
 from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.auth.providers import AuthProvider
+from homeassistant.components import frontend
 from homeassistant.core import HomeAssistant, ServiceResponse
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.json import JsonObjectType
 from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
@@ -99,6 +101,7 @@ def item_record(
     summary: str = "Replace filter",
     description: str | None = None,
     location: str | None = None,
+    timezone: str = "UTC",
     due: str | None = "2026-10-15",
     status: Literal["needs_action", "completed"] = "needs_action",
     schedule_kind: Literal["once", "standing", "recurring", "instruction"] = (
@@ -116,7 +119,7 @@ def item_record(
         "checklist": [
             {"id": step["id"], "summary": step["summary"]} for step in checklist or []
         ],
-        "timezone": "UTC",
+        "timezone": timezone,
         "location": location,
         "group": None,
         "schedule": (
@@ -195,6 +198,19 @@ class Backend:
 @pytest.fixture(autouse=True)
 def custom_integrations(enable_custom_integrations: None) -> None:
     """Enable the integration from this checkout."""
+
+
+@pytest.fixture(autouse=True)
+def frontend_resources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bootstrap HA's real resource manager without its absent frontend asset wheel."""
+
+    async def setup(hass: HomeAssistant, config: ConfigType) -> bool:
+        hass.data[frontend.DATA_EXTRA_MODULE_URL] = frontend.UrlManager(
+            lambda change, url: None, []
+        )
+        return True
+
+    monkeypatch.setattr(frontend, "async_setup", setup)
 
 
 @pytest.fixture

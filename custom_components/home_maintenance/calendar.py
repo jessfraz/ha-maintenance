@@ -58,7 +58,7 @@ class MaintenanceCalendar(CoordinatorEntity[MaintenanceCoordinator], CalendarEnt
                     start=item.due,
                     end=item.due + timedelta(days=1),
                     summary=item.summary,
-                    description=self.coordinator.item_description(item),
+                    description=self.coordinator.item_description(item, markdown=False),
                     location=item.location,
                     uid=str(item.occurrence_id),
                 )

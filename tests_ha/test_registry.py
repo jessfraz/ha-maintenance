@@ -122,6 +122,7 @@ async def test_registry_links_follow_renames_deletions_and_shared_item_reference
     assert original[0] == original[1]
     assert f"/config/devices/device/{registered_objects.device_id}" in original[0]
     assert f"more-info-entity-id={registered_objects.entity_id}" in original[0]
+    assert "[Example appliance](" in original[0]
     assert "another Home Assistant instance" in original[0]
     calendar = await hass.services.async_call(
         "calendar",
@@ -134,10 +135,18 @@ async def test_registry_links_follow_renames_deletions_and_shared_item_reference
         blocking=True,
         return_response=True,
     )
-    assert [
+    calendar_descriptions = [
         event["description"]
         for event in entity_items(calendar, "calendar.maintenance", "events")
-    ] == original
+    ]
+    assert len(calendar_descriptions) == 2
+    for description in calendar_descriptions:
+        assert isinstance(description, str)
+        assert "- Example appliance: " in description
+        assert f"/config/devices/device/{registered_objects.device_id}" in description
+        assert "- Example temperature: " in description
+        assert f"/?more-info-entity-id={registered_objects.entity_id}" in description
+        assert "](" not in description
     # Core copies the displayed description into its partial completion update.
     # The enriched producer must also own the completion comparison.
     await hass.services.async_call(

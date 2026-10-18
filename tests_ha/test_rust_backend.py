@@ -5,7 +5,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -1331,3 +1331,77 @@ async def test_link_heavy_inventory_keeps_all_items_across_bounded_pages(
     state = hass.states.get("todo.maintenance")
     assert state is not None
     assert state.state == "220"
+
+
+async def test_native_card_uses_stable_task_ids_and_refreshes_real_status(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    rust_backend: RustBackend,
+) -> None:
+    due = datetime.now(UTC).date().isoformat()
+    async with async_get_clientsession(hass).post(
+        f"{rust_backend.origin}/v1/items",
+        headers={
+            "Authorization": f"Bearer {rust_backend.owner_token}",
+            "Idempotency-Key": "create-card-example",
+        },
+        json={
+            "id": "example-card-task",
+            "name": "Example equipment",
+            "summary": "Check example equipment",
+            "timezone": "UTC",
+            "due": due,
+            "schedule": {"kind": "once"},
+        },
+    ) as response:
+        assert response.status == 201
+        original = MaintenanceItem.parse(await response.json())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+            CONF_ADDON_SLUG: "example_home_maintenance",
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    admin = await hass_client()
+    response = await admin.get("/api/home_maintenance/card")
+    assert response.status == 200
+    card = await response.json()
+    assert card == {
+        "app_path": "/app/example_home_maintenance/",
+        "can_open": True,
+        "total": 1,
+        "items": [
+            {
+                "id": original.id,
+                "name": original.name,
+                "summary": original.summary,
+                "status": "needs_action",
+                "due": due,
+                "timezone": "UTC",
+            }
+        ],
+    }
+    assert card["items"][0]["id"] != str(original.occurrence_id)
+    response = await admin.post(
+        f"{PREFIX}/items/{original.id}/completions",
+        headers={
+            "If-Match": f'"{original.revision}"',
+            "Idempotency-Key": "complete-card-example",
+        },
+        json={"occurrence_id": str(original.occurrence_id)},
+    )
+    assert response.status == 200
+    response = await admin.get("/api/home_maintenance/card")
+    assert response.status == 200
+    assert (await response.json())["total"] == 0
+    response = await admin.get("/api/home_maintenance/card?view=completed")
+    assert response.status == 200
+    completed = await response.json()
+    assert completed["total"] == 1
+    assert completed["items"][0]["id"] == original.id
+    assert completed["items"][0]["status"] == "completed"

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 ITEM_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 REGISTRY_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -149,6 +150,7 @@ class MaintenanceItem:
     summary: str
     description: str | None
     location: str | None
+    timezone: ZoneInfo
     revision: int
     archived: bool
     status: ItemStatus
@@ -195,6 +197,7 @@ class MaintenanceItem:
         summary = value.get("summary")
         description = value.get("description")
         location = value.get("location")
+        timezone_name = value.get("timezone")
         revision = value.get("revision")
         archived = value.get("archived")
         status = value.get("status")
@@ -211,6 +214,7 @@ class MaintenanceItem:
             or not summary.strip()
             or (description is not None and not isinstance(description, str))
             or (location is not None and not isinstance(location, str))
+            or not isinstance(timezone_name, str)
             or type(revision) is not int
             or revision < 1
             or type(archived) is not bool
@@ -224,6 +228,10 @@ class MaintenanceItem:
             or len(home_assistant) > 100
         ):
             raise ValueError("Invalid item")
+        try:
+            timezone = ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError) as err:
+            raise ValueError("Invalid item timezone") from err
         completed_at = None
         last_completion = value.get("last_completion")
         if last_completion is not None:
@@ -267,6 +275,7 @@ class MaintenanceItem:
             summary,
             description,
             location,
+            timezone,
             revision,
             archived,
             ItemStatus(status),

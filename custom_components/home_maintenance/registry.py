@@ -133,6 +133,8 @@ def describe_references(
     hass: HomeAssistant,
     instance_id: str | None,
     references: tuple[HomeAssistantReference, ...],
+    *,
+    markdown: bool = True,
 ) -> str | None:
     """Resolve selected links locally; missing objects never become another object."""
     if not references:
@@ -167,8 +169,11 @@ def describe_references(
                     "more-info-view": "info",
                 }
             )
-        label = _MARKDOWN.sub(r"\\\1", _display_name(name, reference.id))
-        lines.append(
-            f"- [{label}]({origin}{path})" + (" (disabled)" if disabled else "")
-        )
+        label = _display_name(name, reference.id)
+        if markdown:
+            label = _MARKDOWN.sub(r"\\\1", label)
+            link = f"[{label}]({origin}{path})"
+        else:
+            link = f"{label}: {origin}{path}"
+        lines.append(f"- {link}" + (" (disabled)" if disabled else ""))
     return "\n".join(lines)

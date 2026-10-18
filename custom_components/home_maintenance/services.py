@@ -121,7 +121,9 @@ async def _async_mutate_occurrence(
         raise HomeAssistantError("Cannot contact the Maintenance backend") from None
     check_response(response)
     try:
-        item = MaintenanceItem.parse(response.json())
+        item = await coordinator.hass.async_add_executor_job(
+            MaintenanceItem.parse, response.json()
+        )
     except ValueError:
         raise HomeAssistantError("The backend returned an invalid item") from None
     await coordinator.async_request_refresh()

@@ -64,8 +64,9 @@ or expired identity evidence denies protected changes until a fresh check-in.
 An item can link to several Home Assistant devices or entities, and each device
 or entity can have several maintenance items. Choose them in the item's **Home
 Assistant** section. Links use stable registry IDs scoped to the HA instance,
-so entity renames retain the association. Current names and native HA links
-appear in the dashboard, to-do descriptions, and calendar descriptions.
+so entity renames retain the association. Current names and HA links appear
+in the dashboard and to-do descriptions. Calendar descriptions include names
+and page URLs; HA's native event dialog displays plain text.
 Missing or disabled objects retain their saved links for review. Schedules and
 completion history stay with the maintenance item.
 
@@ -98,6 +99,11 @@ https://home-assistant.example/app/<repository-app-slug>/items/example-air-filte
 
 Copy the stable app route, rather than a temporary ingress session URL. Keep
 item IDs stable after writing tags. Archiving an item retains its history.
+
+For dashboard rows that open the task in Maintenance, use the integration's
+`custom:maintenance-task-list` card. It shows current status and due dates from
+the app, with stable item links through authenticated ingress. See the
+[dashboard card setup](home-maintenance/DOCS.md#dashboard-card).
 
 The integration adds `calendar.maintenance` for calendar cards and calendar
 automations. Each active, dated task appears as an all-day event on its current due
