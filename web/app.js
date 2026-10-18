@@ -20,7 +20,6 @@ let historyRequest = 0;
 let editorBusy = false;
 let editorIdTouched = false;
 let createRequest = null;
-let loadedArchive = false;
 let parentPrefix = null;
 let metadataRowId = 0;
 const completionRequests = new Map();
@@ -242,37 +241,49 @@ function itemPlace(item) {
 
 function renderSummary(summary) {
   const root = byId("summary");
+  const focusedStat = document.activeElement?.dataset?.summary;
   root.replaceChildren();
-  for (const [key, label] of [
-    ["active", "Active items"],
-    ["overdue", "Overdue"],
-    ["due_soon", "Due in 14 days"],
-    ["completed", "Completions recorded"],
+  for (const [key, label, view] of [
+    ["active", "Active items", "active"],
+    ["overdue", "Overdue", "overdue"],
+    ["due_soon", "Due in 14 days", "due_soon"],
+    ["completed", "Completions recorded", "history"],
   ]) {
     const stat = element(
-      "div",
+      "button",
       undefined,
       `summary-stat${key === "overdue" && summary[key] > 0 ? " attention" : ""}`,
     );
+    stat.type = "button";
+    stat.dataset.summary = key;
+    stat.dataset.view = view;
+    stat.setAttribute("aria-pressed", String(byId("view").value === view));
+    stat.setAttribute("aria-label", `${summary[key]} ${label.toLowerCase()}`);
+    stat.addEventListener("click", guarded(() => selectView(view)));
     stat.append(
       element("strong", new Intl.NumberFormat().format(summary[key])),
       element("span", label),
     );
     root.append(stat);
+    if (focusedStat === key) stat.focus({ preventScroll: true });
   }
 }
 
 function renderList() {
   const query = byId("query").value.trim().toLocaleLowerCase();
   const view = byId("view").value;
+  for (const stat of byId("summary").querySelectorAll("button"))
+    stat.setAttribute("aria-pressed", String(stat.dataset.view === view));
   const visible = items
     .filter((item) => {
       const matches = [item.name, item.summary, item.location, item.group]
         .filter(Boolean)
         .some((value) => value.toLocaleLowerCase().includes(query));
       const days = dueInfo(item).days;
+      if (view === "history") return matches && item.last_completion !== null;
       return (
         matches &&
+        item.archived === (view === "archived") &&
         (view === "archived" || item.schedule.kind !== "instruction") &&
         (view === "archived" ||
           (view === "completed"
@@ -282,20 +293,33 @@ function renderList() {
         (view !== "due_soon" || (days !== null && days >= 0 && days <= 14))
       );
     })
-    .sort(
-      (left, right) =>
-        (left.occurrence.due ?? "9999-12-31").localeCompare(
+    .sort((left, right) => {
+      if (view === "history") {
+        const leftTime = left.last_completion?.completed_at;
+        const rightTime = right.last_completion?.completed_at;
+        const order = leftTime && rightTime
+          ? Date.parse(rightTime) - Date.parse(leftTime)
+          : Number(Boolean(rightTime)) - Number(Boolean(leftTime));
+        return order || left.id.localeCompare(right.id);
+      }
+      return (left.occurrence.due ?? "9999-12-31").localeCompare(
           right.occurrence.due ?? "9999-12-31",
         ) ||
         left.name.localeCompare(right.name) ||
-        left.id.localeCompare(right.id),
-    );
+        left.id.localeCompare(right.id);
+    });
   const root = byId("list");
   root.replaceChildren();
-  byId("queue-title").textContent =
-    view === "archived" ? "Archived" : view === "completed" ? "Completed" : "Queue";
+  byId("queue-title").textContent = {
+    active: "Queue",
+    overdue: "Overdue",
+    due_soon: "Due in 14 days",
+    completed: "Completed",
+    history: "Completion history",
+    archived: "Archived",
+  }[view];
   byId("list-status").textContent =
-    `${visible.length} ${visible.length === 1 ? "item" : "items"}${query ? ` matching “${byId("query").value.trim()}”` : ""} · earliest due first`;
+    `${visible.length} ${visible.length === 1 ? "item" : "items"}${query ? ` matching “${byId("query").value.trim()}”` : ""} · ${view === "history" ? "most recent completion first" : "earliest due first"}`;
   if (!visible.length) {
     const empty = element("div", undefined, "empty-state");
     const title = query
@@ -306,7 +330,9 @@ function renderList() {
           ? "Nothing due in the next two weeks"
           : view === "archived"
             ? "No archived items"
-            : view === "completed" ? "No completed items" : "No items";
+            : view === "history"
+              ? "No completions recorded"
+              : view === "completed" ? "No completed items" : "No items";
     const copy = query
       ? "Try a different task, item name, location, or group."
       : view === "active"
@@ -322,7 +348,7 @@ function renderList() {
   }
   const instructions = items
     .filter((item) =>
-      !item.archived && item.schedule.kind === "instruction" &&
+      view === "active" && !item.archived && item.schedule.kind === "instruction" &&
       [item.name, item.summary, item.description, item.location, item.group]
         .filter(Boolean)
         .some((value) => value.toLocaleLowerCase().includes(query)),
@@ -332,8 +358,16 @@ function renderList() {
   byId("instruction-list").replaceChildren(...instructions.map(itemCard));
 }
 
+async function selectView(view) {
+  notice("");
+  byId("view").value = view;
+  renderList();
+  await load();
+}
+
 function itemCard(item) {
   const instruction = item.schedule.kind === "instruction";
+  const history = byId("view").value === "history";
   const card = element(
     "article",
     undefined,
@@ -355,8 +389,12 @@ function itemCard(item) {
     element(
       "div",
       [
-        cadence(item.schedule),
-        item.occurrence.checklist.length
+        history
+          ? item.last_completion.completed_at
+            ? `Last completed ${timestampLabel(item.last_completion.completed_at)}`
+            : "Completion date unknown"
+          : cadence(item.schedule),
+        !history && item.occurrence.checklist.length
           ? checklistProgress(item.occurrence.checklist)
           : null,
       ]
@@ -387,12 +425,13 @@ function itemCard(item) {
 
 async function load() {
   const generation = ++listGeneration;
-  const archived = byId("view").value === "archived";
+  const view = byId("view").value;
+  const archiveFilters = view === "history" ? [false, true] : [view === "archived"];
   byId("refresh").disabled = true;
   byId("list").setAttribute("aria-busy", "true");
   byId("list-status").textContent = "Loading maintenance…";
   try {
-    const loadItems = async () => {
+    const loadItems = async (archived) => {
       const result = [];
       const cursors = new Set();
       let cursor = null;
@@ -414,14 +453,18 @@ async function load() {
       } while (cursor);
       return result;
     };
-    const [loaded, summary, system] = await Promise.all([
-      loadItems(),
+    const [collections, summary, system] = await Promise.all([
+      Promise.all(archiveFilters.map(loadItems)),
       api("v1/summary"),
       api("v1/system"),
     ]);
-    if (generation !== listGeneration || !loaded) return;
-    items = loaded;
-    loadedArchive = archived;
+    if (generation !== listGeneration || collections.some((page) => page === null)) return;
+    const latest = new Map();
+    for (const item of collections.flat()) {
+      const previous = latest.get(item.id);
+      if (!previous || item.revision > previous.revision) latest.set(item.id, item);
+    }
+    items = [...latest.values()];
     renderSystem(system);
     renderSummary(summary);
     renderList();
@@ -570,7 +613,8 @@ function renderDetail() {
   const item = selected;
   if (!item) return;
   const instruction = item.schedule.kind === "instruction";
-  byId("history-title").closest("section").hidden = instruction;
+  byId("history-title").closest("section").hidden =
+    instruction && item.last_completion === null;
   byId("detail-title").textContent = item.summary;
   byId("detail-location").textContent = itemPlace(item);
   const root = byId("detail-content");
@@ -720,7 +764,8 @@ async function openDetail(id, updateRoute = true) {
   renderDetail();
   if (!byId("detail").open) byId("detail").showModal();
   if (updateRoute) navigate(id);
-  if (item.schedule.kind !== "instruction") await loadEvents(generation);
+  if (item.schedule.kind !== "instruction" || item.last_completion !== null)
+    await loadEvents(generation);
 }
 
 function closeDetail(updateRoute = true) {
@@ -1412,8 +1457,7 @@ byId("query").addEventListener("input", renderList);
 byId("view").addEventListener(
   "change",
   guarded(async () => {
-    if ((byId("view").value === "archived") !== loadedArchive) await load();
-    else renderList();
+    await selectView(byId("view").value);
   }),
 );
 byId("home").addEventListener("click", (event) => {
