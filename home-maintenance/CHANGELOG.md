@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1
+
+- Give task details and search controls a single column on phones so dates and time zones stay readable.
+- Make buttons and dialog close controls at least 44 pixels tall.
+
 ## 0.10.0
 
 - Add an optional `hide_when_empty` setting to the task-list card. Empty queues release their layout space and keep refreshing.
