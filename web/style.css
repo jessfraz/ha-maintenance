@@ -301,6 +301,16 @@ main,
   display: grid;
   gap: 10px;
 }
+.standing-instructions {
+  margin: 28px 0 36px;
+}
+.standing-instructions h2 {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+.instruction-card .task-description {
+  margin: 12px 0 0;
+}
 .item-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

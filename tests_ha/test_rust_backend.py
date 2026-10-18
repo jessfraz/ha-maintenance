@@ -869,3 +869,203 @@ async def test_migrated_undated_completed_and_standing_tasks_remain_faithful_in_
     )
     assert "due" not in items["Undated example task"]
     assert "due" not in items["Standing example task"]
+
+
+async def test_instructions_stay_read_only_and_only_verified_owner_can_archive(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_owner_user: MockUser,
+    hass_user_token: str,
+    rust_backend: RustBackend,
+) -> None:
+    """Actual HA identity and the Rust API preserve a household reference."""
+    session = async_get_clientsession(hass)
+    async with session.post(
+        f"{rust_backend.origin}/v1/items",
+        headers={
+            "Authorization": f"Bearer {rust_backend.owner_token}",
+            "Idempotency-Key": "create-example-instruction",
+        },
+        json={
+            "id": "example-instruction",
+            "name": "Example reference",
+            "summary": "Keep the example reference available",
+            "description": "A persistent reference for household members.",
+            "timezone": "UTC",
+            "schedule": {"kind": "instruction"},
+        },
+    ) as response:
+        assert response.status == 201
+        original = MaintenanceItem.parse(await response.json())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    admin = await hass_client()
+    household = await hass_client(hass_user_token)
+    token = await hass.auth.async_create_refresh_token(
+        hass_owner_user, client_id="https://example.invalid"
+    )
+    owner = await hass_client(hass.auth.async_create_access_token(token))
+    system = await (await owner.get(f"{PREFIX}/system")).json()
+    assert system["can_manage_instructions"] is True
+    for client in (admin, household):
+        system = await (await client.get(f"{PREFIX}/system")).json()
+        assert system["can_manage_instructions"] is False
+        response = await client.patch(
+            f"{PREFIX}/items/{original.id}",
+            headers={"If-Match": '"1"', "X-Maintenance-Owner": "true"},
+            json={"summary": "Changed by another user"},
+        )
+        assert response.status == 403
+        response = await client.put(
+            f"{PREFIX}/items/{original.id}/archive",
+            headers={"If-Match": '"1"', "X-Maintenance-Owner": "true"},
+        )
+        assert response.status == 403
+    for number, client in enumerate((owner, admin, household)):
+        for suffix, method, body in (
+            (
+                "completions",
+                client.post,
+                {"occurrence_id": str(original.occurrence_id)},
+            ),
+            (
+                f"checklist/{STEP_ID}",
+                client.put,
+                {"occurrence_id": str(original.occurrence_id), "completed": True},
+            ),
+            ("reorders", client.post, {}),
+        ):
+            response = await method(
+                f"{PREFIX}/items/{original.id}/{suffix}",
+                headers={
+                    "If-Match": '"1"',
+                    "Idempotency-Key": f"instruction-{number}-{suffix}",
+                },
+                json=body,
+            )
+            assert response.status == 409
+    response = await household.get(f"{PREFIX}/items/{original.id}")
+    assert MaintenanceItem.parse(await response.json()) == original
+    events = await (await owner.get(f"{PREFIX}/items/{original.id}/events")).json()
+    assert events["items"] == []
+    tasks = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    assert entity_items(tasks, "todo.maintenance") == []
+    references = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance_instructions"},
+        blocking=True,
+        return_response=True,
+    )
+    reference = entity_items(references, "todo.maintenance_instructions")
+    assert len(reference) == 1
+    assert reference[0]["summary"] == original.summary
+    assert "status" not in reference[0]
+    response = await owner.patch(
+        f"{PREFIX}/items/{original.id}",
+        headers={"If-Match": '"1"'},
+        json={"summary": "Updated example reference"},
+    )
+    assert response.status == 200
+    updated = MaintenanceItem.parse(await response.json())
+    response = await owner.put(
+        f"{PREFIX}/items/{original.id}/archive",
+        headers={"If-Match": f'"{updated.revision}"'},
+    )
+    assert response.status == 200
+    await entry.runtime_data.async_refresh()
+    references = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance_instructions"},
+        blocking=True,
+        return_response=True,
+    )
+    assert entity_items(references, "todo.maintenance_instructions") == []
+    response = await household.get(f"{PREFIX}/items/{original.id}")
+    archived = MaintenanceItem.parse(await response.json())
+    assert archived.archived is True
+    response = await admin.delete(
+        f"{PREFIX}/items/{original.id}/archive",
+        headers={"If-Match": f'"{archived.revision}"'},
+    )
+    assert response.status == 403
+
+
+async def test_recurring_writes_require_a_due_date_through_the_ha_bridge(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    rust_backend: RustBackend,
+) -> None:
+    """The server rejects missing dates even when callers skip browser defaults."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    admin = await hass_client()
+    schedule = {"kind": "recurring", "interval": {"days": 30, "months": 0, "years": 0}}
+    definition = {
+        "id": "example-recurring-task",
+        "name": "Example recurring task",
+        "summary": "Example recurring task",
+        "timezone": "UTC",
+        "schedule": schedule,
+    }
+    for number, due in enumerate(({}, {"due": None})):
+        response = await admin.post(
+            f"{PREFIX}/items",
+            json={**definition, **due},
+            headers={"Idempotency-Key": f"missing-date-{number}"},
+        )
+        assert response.status == 400
+    response = await admin.post(
+        f"{PREFIX}/items",
+        json={**definition, "schedule": {"kind": "once"}},
+        headers={"Idempotency-Key": "create-undated-once"},
+    )
+    assert response.status == 201
+    original = MaintenanceItem.parse(await response.json())
+    response = await admin.patch(
+        f"{PREFIX}/items/{original.id}",
+        json={"schedule": schedule},
+        headers={"If-Match": f'"{original.revision}"'},
+    )
+    assert response.status == 400
+    due = date.today().isoformat()
+    response = await admin.patch(
+        f"{PREFIX}/items/{original.id}",
+        json={"schedule": schedule, "due": due},
+        headers={"If-Match": f'"{original.revision}"'},
+    )
+    assert response.status == 200
+    recurring = MaintenanceItem.parse(await response.json())
+    assert recurring.due is not None
+    assert recurring.due.isoformat() == due
+    response = await admin.patch(
+        f"{PREFIX}/items/{original.id}",
+        json={"due": None},
+        headers={"If-Match": f'"{recurring.revision}"'},
+    )
+    assert response.status == 400
+    response = await admin.get(f"{PREFIX}/items/{original.id}")
+    assert MaintenanceItem.parse(await response.json()) == recurring

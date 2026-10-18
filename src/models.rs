@@ -121,6 +121,7 @@ pub enum Schedule {
     #[default]
     Once,
     Standing,
+    Instruction,
     Recurring {
         interval: Interval,
     },
@@ -238,6 +239,13 @@ impl Definition {
         if let Some(value) = &self.reorder_url {
             url(value)?;
         }
+        if self.schedule == Schedule::Instruction
+            && (!self.checklist.is_empty() || self.reorder_url.is_some())
+        {
+            return Err(Error::Invalid(
+                "instructions cannot have checklist steps or a reorder URL",
+            ));
+        }
         Ok(())
     }
 
@@ -307,7 +315,20 @@ pub struct CreateItem {
 impl CreateItem {
     pub fn validate(&self) -> Result<(), Error> {
         self.definition.validate()?;
-        self.due.map(validate_date).transpose().map(|_| ())
+        validate_due(self.definition.schedule, self.due)
+    }
+}
+
+/// Recurring tasks always have a concrete first due date. Instructions never do.
+pub fn validate_due(schedule: Schedule, due: Option<NaiveDate>) -> Result<(), Error> {
+    match (schedule, due) {
+        (Schedule::Recurring { .. }, None) => {
+            Err(Error::Invalid("recurring tasks require a due date"))
+        }
+        (Schedule::Instruction, Some(_)) => {
+            Err(Error::Invalid("instructions cannot have a due date"))
+        }
+        (_, due) => due.map(validate_date).transpose().map(|_| ()),
     }
 }
 
@@ -400,7 +421,7 @@ impl UpdateItem {
         self.resources.apply(&mut definition.resources);
         self.reorder_url.apply(&mut definition.reorder_url);
         definition.validate()?;
-        due.map(validate_date).transpose().map(|_| ())
+        validate_due(definition.schedule, *due)
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -641,7 +662,8 @@ impl Migration {
         let mut total = 0;
         for item in &self.items {
             item.source.validate()?;
-            item.item.validate()?;
+            item.item.definition.validate()?;
+            item.item.due.map(validate_date).transpose()?;
             total += item.history.len();
             if total > 10_000 {
                 return Err(Error::Invalid(

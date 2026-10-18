@@ -449,7 +449,7 @@ async def test_undated_tasks_preserve_native_status_without_inventing_dates(
         200,
         json.dumps(
             {
-                "items": [item_record(due=due, status=status)],
+                "items": [item_record(due=due, status=status, schedule_kind="once")],
                 "next_page": None,
             }
         ).encode(),

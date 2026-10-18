@@ -28,8 +28,8 @@ an image has been published.
 ## Maintenance items
 
 Each item has a stable ID, a name for the thing being maintained, an action
-summary, and an IANA time zone. A due date is optional; unknown dates stay
-unknown. For example,
+summary, and an IANA time zone. One-off and standing tasks can have an unknown
+due date; recurring tasks require a concrete first due date. For example,
 an item named "Example air filter" has the summary "Replace the example air
 filter". A description, checklist, instructions, specifications, resource
 links, group, and location are optional.
@@ -37,14 +37,29 @@ links, group, and location are optional.
 Choose a task type:
 
 - **One-off:** completion closes the task and retains its occurrence and history.
-- **Standing:** completion records the work and starts a fresh, undated occurrence.
+- **Standing task:** completion records the work and starts a fresh, undated occurrence.
 - **Recurring:** completion starts a new occurrence using a positive calendar
   interval, measured from the actual completion date in the item's time zone.
+- **Standing instruction:** permanent reference information, shown separately
+  from actionable work. It has no due date, checklist, reorder, or completion.
+  Only the Home Assistant owner can edit or remove it. A standalone owner
+  credential has the same authority.
 
-The API represents these as `{"kind":"once"}`, `{"kind":"standing"}`, or
-`{"kind":"recurring","interval":{"months":3}}` in `schedule`. A newly created
-item defaults to one-off when its schedule is omitted. Omitting `due`, or
-setting it to `null`, does not assign today's date.
+The API represents these as `{"kind":"once"}`, `{"kind":"standing"}`,
+`{"kind":"recurring","interval":{"months":3}}`, or `{"kind":"instruction"}`
+in `schedule`. A newly created item defaults to one-off when its schedule is
+omitted. The form supplies today's date in the selected time zone when choosing
+recurring work. API clients must supply a concrete `due`; missing or null dates
+return **400**, including catalog imports and edits that would leave a recurring
+task undated. One-off and standing tasks retain an omitted or null due date.
+
+Standing instructions appear in a separate dashboard section and a read-only
+Home Assistant Instructions list. They cannot be completed by a person or an
+automation, and they are excluded from active-task counts and the calendar.
+Other administrators cannot edit, archive, or change their type. Removal uses
+the existing reversible archive; only the owner can restore it. The integration
+announces the authenticated HA owner identity for ingress authorization. Missing
+or expired identity evidence denies protected changes until a fresh check-in.
 
 Checklist steps belong to the current occurrence. Checking a step records its
 actor and time without completing the item. Explicitly completing the item
@@ -169,6 +184,11 @@ These endpoints use the backend API directly; the HA REST bridge does not
 expose administrative migrations.
 
 Review task types explicitly when the source has no recurrence information.
+Recurring mappings require an explicit first due date; an unknown source date
+is a preview conflict, not permission to manufacture a historical date.
+Existing undated recurring records from 0.3 remain readable for correction;
+edits must supply a real date. Completing actual work can establish its next
+due date without inventing a previous one.
 Matching titles alone do not establish source identity. Do not merge records,
 invent dates, or infer old completion events from current state. This API
 accepts all-day dates; a source containing a due timestamp needs an explicit

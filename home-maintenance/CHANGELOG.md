@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Standing instructions stay visible in a separate, read-only list and cannot be completed. Only the Home Assistant owner can edit or remove them.
+- Recurring tasks require a concrete first due date. The form defaults to today in the selected time zone; the API rejects missing or cleared dates.
+- Owner permissions are enforced in the backend for protected creation, edits, type changes, archival, restoration, and migration.
+
 ## 0.3.0
 
 - Optional due dates and explicit one-off, standing, and recurring task types.

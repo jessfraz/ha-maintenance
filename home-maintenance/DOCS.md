@@ -4,7 +4,7 @@ Install both parts:
 
 - The **Maintenance app** runs the Rust service, SQLite database, and dashboard.
 - The **Maintenance integration**, installed through HACS, adds sensors,
-  actions, a native to-do entity, and a calendar.
+  actions, a native to-do entity, a read-only Instructions list, and a calendar.
 
 Use `https://github.com/jessfraz/ha-maintenance` for both repositories.
 
@@ -41,7 +41,8 @@ a running app alone does not establish that pairing succeeded.
 ## Add items
 
 Use the dashboard or authenticated API to create an item. Give it a permanent
-ID, a name, an action summary, and time zone. A due date is optional. The name
+ID, a name, an action summary, and time zone. Recurring tasks require a first
+due date; one-off and standing tasks may be undated. The name
 identifies the thing, such as "Example air filter"; the summary describes the
 work, such as "Replace the example air filter". A description, checklist,
 instructions, specifications, resource links, group, location, and reorder link
@@ -52,8 +53,17 @@ supplied.
 Choose one-off, standing, or recurring work. One-off completion closes the
 task. Standing completion records the work and starts a fresh undated
 occurrence. Recurring completion uses a positive calendar interval from the
-actual completion date. Leave an unknown due date blank; the service does not
-substitute today.
+actual completion date. Choosing recurring work fills today's date in the
+selected time zone. The API rejects a missing or null recurring due date,
+including imports and edits that clear it.
+
+Choose **Standing instruction** for always-applicable guidance. It stays in
+the dashboard and HA's read-only Instructions list without becoming work to
+check off. It has no due date or completion action. Only the Home Assistant
+owner can edit or remove it, including through the API; other administrators
+cannot. Removal archives the instruction, and only the owner can restore it.
+The integration must be connected with a recent owner check-in for protected
+ingress changes. A standalone owner credential retains that authority.
 
 Each checklist template has up to 100 steps with unique, stable UUIDs and
 nonblank summaries of up to 200 UTF-8 bytes. Checking a step saves the actor
@@ -140,7 +150,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.3.0
+  ghcr.io/jessfraz/ha-maintenance:0.4.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

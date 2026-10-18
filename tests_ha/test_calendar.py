@@ -334,6 +334,7 @@ async def test_calendar_only_projects_active_dated_occurrences(
             item_id="undated-task",
             occurrence_id=NEXT_OCCURRENCE_ID,
             due=None,
+            schedule_kind="once",
         ),
         item_record(
             item_id="completed-task",

@@ -1,19 +1,29 @@
 {
   "items": [
     {
-      "source": {"system": "example", "collection": "example-todos", "id": "EXAMPLE-completed-001"},
+      "source": {
+        "system": "example",
+        "collection": "example-todos",
+        "id": "EXAMPLE-completed-001"
+      },
       "item": {
         "id": "example-once",
         "name": "Example inspection",
         "summary": "Inspect the example equipment",
         "timezone": "Etc/UTC",
         "due": null,
-        "schedule": {"kind": "once"}
+        "schedule": {
+          "kind": "once"
+        }
       },
       "status": "completed",
       "history": [
         {
-          "source": {"system": "example", "collection": "example-history", "id": "EXAMPLE-event-001"},
+          "source": {
+            "system": "example",
+            "collection": "example-history",
+            "id": "EXAMPLE-event-001"
+          },
           "completed_at": "2031-01-15T12:00:00Z",
           "actor": null,
           "occurrence_id": null,
@@ -23,13 +33,36 @@
       ]
     },
     {
-      "source": {"system": "example", "collection": "example-todos", "id": "EXAMPLE-standing-001"},
+      "source": {
+        "system": "example",
+        "collection": "example-todos",
+        "id": "EXAMPLE-standing-001"
+      },
       "item": {
         "id": "example-standing",
         "name": "Example workspace",
         "summary": "Tidy the example workspace",
         "timezone": "Etc/UTC",
-        "schedule": {"kind": "standing"}
+        "schedule": {
+          "kind": "standing"
+        }
+      }
+    },
+    {
+      "source": {
+        "system": "example",
+        "collection": "example-todos",
+        "id": "EXAMPLE-instruction-001"
+      },
+      "item": {
+        "id": "example-instruction",
+        "name": "Example equipment care",
+        "summary": "Keep the example equipment dry",
+        "description": "Wipe with a dry cloth. Keep liquids away from the example equipment.",
+        "timezone": "Etc/UTC",
+        "schedule": {
+          "kind": "instruction"
+        }
       }
     }
   ]

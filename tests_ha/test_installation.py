@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
+    MockUser,
     async_fire_time_changed,
 )
 
@@ -114,6 +115,23 @@ async def setup_paired(hass: HomeAssistant, backend: Backend) -> MockConfigEntry
 
 def check_ins(backend: Backend) -> list[ReceivedRequest]:
     return [request for request in backend.requests if request.path == PRESENCE_PATH]
+
+
+async def test_presence_reports_only_the_active_owner_identity(
+    hass: HomeAssistant,
+    backend: Backend,
+    inventory: BackupInventory,
+    hass_owner_user: MockUser,
+    hass_admin_user: MockUser,
+    hass_user: MockUser,
+) -> None:
+    await setup_paired(hass, backend)
+    report = json.loads(check_ins(backend)[-1].body)
+    assert report["owner_id"] == hass_owner_user.id
+    assert set(report) == {"version", "backup", "owner_id"}
+    assert hass_admin_user.id not in check_ins(backend)[-1].body.decode()
+    assert hass_user.id not in check_ins(backend)[-1].body.decode()
+    assert "X-Maintenance-Owner" not in check_ins(backend)[-1].headers
 
 
 @pytest.mark.parametrize("status", ["complete", "app_only", "missing", "outdated"])

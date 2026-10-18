@@ -23,7 +23,7 @@ from .client import Actor, BackendResponse, ResponseTooLarge
 from .const import DOMAIN
 from .coordinator import MaintenanceCoordinator
 from .http import loaded_coordinator
-from .models import ITEM_ID, MaintenanceItem
+from .models import ITEM_ID, MaintenanceItem, ScheduleKind
 
 
 class CompletionResult(TypedDict):
@@ -58,7 +58,12 @@ async def async_actor(hass: HomeAssistant, context: Context) -> Actor:
     user = await hass.auth.async_get_user(context.user_id)
     if user is None or not user.is_active:
         raise Unauthorized(context=context)
-    return Actor(user.id, user.name or "Home Assistant user", user.is_admin)
+    return Actor(
+        user.id,
+        user.name or "Home Assistant user",
+        user.is_admin,
+        owner=user.is_owner and user.is_admin,
+    )
 
 
 def check_response(response: BackendResponse) -> None:
@@ -87,6 +92,13 @@ async def _async_mutate_occurrence(
     idempotency_key: str | None = None,
 ) -> MaintenanceItem:
     """Apply one versioned mutation without retrying against a newer occurrence."""
+    if any(
+        item.id == item_id and item.schedule_kind is ScheduleKind.INSTRUCTION
+        for item in coordinator.data.items
+    ):
+        raise ServiceValidationError(
+            "Standing instructions cannot be completed or checked off"
+        )
     path = f"/v1/items/{item_id}"
     try:
         if if_match is None:

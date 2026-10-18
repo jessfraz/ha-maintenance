@@ -40,6 +40,10 @@
           class="summary"
           aria-label="Maintenance summary"
         ></div>
+        <section id="standing-instructions" class="standing-instructions" hidden aria-labelledby="standing-instructions-title">
+          <h2 id="standing-instructions-title">Standing instructions</h2>
+          <div id="instruction-list" class="items"></div>
+        </section>
         <div class="queue-heading">
           <div>
             <h1 id="queue-title">Queue</h1>
@@ -184,8 +188,8 @@
             >
           </div>
           <div class="columns">
-            <label for="due"
-              >Due date (optional)<input
+          <label for="due"
+              ><span id="due-label">Due date (optional)</span><input
                 id="due"
                 name="due"
                 type="date"
@@ -211,8 +215,9 @@
             <label for="schedule-kind">Task type
               <select id="schedule-kind" name="schedule-kind">
                 <option value="once">One-off</option>
-                <option value="standing">Standing</option>
+                <option value="standing">Standing task</option>
                 <option value="recurring">Recurring</option>
+                <option value="instruction">Standing instruction</option>
               </select>
             </label>
             <p id="schedule-help" class="field-help"></p>

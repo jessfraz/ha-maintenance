@@ -20,9 +20,25 @@ use crate::{
         ItemId, ItemStatus, Migration, MigrationAction, MigrationItem, MigrationMapping,
         MigrationReport, Occurrence, Page, Reorder, ReorderContent, ReorderItem, ReorderReceipt,
         ReorderStatus, ResolveReorder, Schedule, SetChecklistStep, StepCompletion, Summary,
-        UpdateItem,
+        UpdateItem, validate_due,
     },
 };
+
+/// Management authority is supplied by the authenticated API principal.
+#[derive(Clone, Copy)]
+pub enum Management {
+    Administrator,
+    Owner,
+}
+impl Management {
+    fn check_instruction(self, schedule: Schedule) -> Result<(), Error> {
+        if schedule == Schedule::Instruction && !matches!(self, Self::Owner) {
+            Err(Error::Forbidden)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -45,8 +61,8 @@ const ITEM_ARCHIVE: &str = "UPDATE items SET archived=?,revision=? WHERE id=?";
 const DATABASE_NOW: &str = "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const COMPLETION_INSERT: &str = "INSERT INTO completions(id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist) VALUES (?,?,?,?,?,?,?,?)";
 const OCCURRENCE_ADVANCE: &str = "UPDATE items SET due=?,occurrence_id=?,revision=?,last_completion_id=?,checklist=?,status=? WHERE id=?";
-const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' ORDER BY sort_due,id LIMIT 200";
-const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' AND (sort_due,id)>(?,?) ORDER BY sort_due,id LIMIT 200";
+const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' AND json_extract(definition,'$.schedule.kind')!='instruction' ORDER BY sort_due,id LIMIT 200";
+const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' AND json_extract(definition,'$.schedule.kind')!='instruction' AND (sort_due,id)>(?,?) ORDER BY sort_due,id LIMIT 200";
 const COMPLETION_COUNT: &str = "SELECT count(*) FROM completions";
 const REORDER_INSERT: &str = "INSERT INTO reorders(id,receipt) VALUES(?,?)";
 const REORDER_GET: &str =
@@ -390,24 +406,38 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(Page { items, next_page })
     }
-    pub async fn create(&self, input: CreateItem, actor: &Actor, key: &str) -> Result<Item, Error> {
-        input.validate()?;
+    pub async fn create(
+        &self,
+        input: CreateItem,
+        actor: &Actor,
+        key: &str,
+        management: Management,
+    ) -> Result<Item, Error> {
+        management.check_instruction(input.definition.schedule)?;
         let fingerprint = create_fingerprint(&input)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // An acknowledgement from an older version remains replayable even if
+        // its original definition would now need an explicit first due date.
         if let Some(item) = replay(&mut transaction, actor, key, &fingerprint).await? {
             return Ok(item);
         }
+        input.validate()?;
         insert_item(&mut transaction, &input).await?;
         let item = get_item(&mut transaction, &input.id).await?;
         save_replay(&mut transaction, actor, key, &fingerprint, &item).await?;
         transaction.commit().await?;
         Ok(item)
     }
-    pub async fn import(&self, input: ImportCatalog) -> Result<Page<Item>, Error> {
+    pub async fn import(
+        &self,
+        input: ImportCatalog,
+        management: Management,
+    ) -> Result<Page<Item>, Error> {
         if input.items.is_empty() || input.items.len() > 200 {
             return Err(Error::Invalid("import requires 1..200 items"));
         }
         for item in &input.items {
+            management.check_instruction(item.definition.schedule)?;
             item.validate()?;
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -436,13 +466,25 @@ impl Store {
         input: Migration,
         actor: &Actor,
         key: &str,
+        management: Management,
     ) -> Result<MigrationReport, Error> {
+        for item in &input.items {
+            management.check_instruction(item.item.definition.schedule)?;
+        }
         let fingerprint = fingerprint("migrate", &input)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(report) = replay(&mut transaction, actor, key, &fingerprint).await? {
             return Ok(report);
         }
         input.validate()?;
+        for item in &input.items {
+            item.item.validate()?;
+            if item.item.definition.schedule == Schedule::Instruction
+                && item.status != ItemStatus::NeedsAction
+            {
+                return Err(Error::Invalid("instructions must remain active"));
+            }
+        }
         let report = migration_report(&mut transaction, &input).await?;
         if !report.applicable {
             return Err(Error::Conflict(
@@ -486,11 +528,19 @@ impl Store {
         id: &ItemId,
         revision: i64,
         input: UpdateItem,
+        management: Management,
     ) -> Result<Item, Error> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let mut item = get_item(&mut transaction, id).await?;
+        management.check_instruction(item.definition.schedule)?;
         check_revision(&item, revision)?;
         input.apply(&mut item.definition, &mut item.occurrence.due)?;
+        management.check_instruction(item.definition.schedule)?;
+        if item.definition.schedule == Schedule::Instruction
+            && item.status != ItemStatus::NeedsAction
+        {
+            return Err(Error::Invalid("completed tasks cannot become instructions"));
+        }
         item.occurrence.checklist = item.definition.checklist_state(&item.occurrence.checklist);
         let revision = next_revision(item.revision)?;
         sqlx::query(ITEM_UPDATE)
@@ -505,9 +555,16 @@ impl Store {
         transaction.commit().await?;
         Ok(result)
     }
-    pub async fn archive(&self, id: &ItemId, revision: i64, archived: bool) -> Result<Item, Error> {
+    pub async fn archive(
+        &self,
+        id: &ItemId,
+        revision: i64,
+        archived: bool,
+        management: Management,
+    ) -> Result<Item, Error> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let item = get_item(&mut transaction, id).await?;
+        management.check_instruction(item.definition.schedule)?;
         check_revision(&item, revision)?;
         sqlx::query(ITEM_ARCHIVE)
             .bind(archived)
@@ -535,6 +592,7 @@ impl Store {
             return Ok(item);
         }
         let item = get_item(&mut transaction, id).await?;
+        reject_instruction_action(item.definition.schedule)?;
         check_revision(&item, revision)?;
         if item.archived || item.status == ItemStatus::Completed {
             return Err(Error::Conflict(
@@ -557,6 +615,9 @@ impl Store {
                 )?,
             ),
             Schedule::Once | Schedule::Standing => None,
+            Schedule::Instruction => {
+                return Err(Error::Conflict("instructions cannot be completed"));
+            }
         };
         let once = item.definition.schedule == Schedule::Once;
         let event_id = Uuid::now_v7();
@@ -614,6 +675,7 @@ impl Store {
             return Ok(item);
         }
         let mut item = get_item(&mut transaction, id).await?;
+        reject_instruction_action(item.definition.schedule)?;
         check_revision(&item, revision)?;
         if item.archived || item.status == ItemStatus::Completed {
             return Err(Error::Conflict(
@@ -669,6 +731,7 @@ impl Store {
             return Ok(receipt);
         }
         let item = get_item(&mut transaction, id).await?;
+        reject_instruction_action(item.definition.schedule)?;
         check_revision(&item, revision)?;
         if item.archived {
             return Err(Error::Conflict("archived items cannot be reordered"));
@@ -867,6 +930,15 @@ impl Store {
         Ok(summary)
     }
 }
+fn reject_instruction_action(schedule: Schedule) -> Result<(), Error> {
+    if schedule == Schedule::Instruction {
+        Err(Error::Conflict(
+            "standing instructions cannot be completed, checked or reordered",
+        ))
+    } else {
+        Ok(())
+    }
+}
 fn fingerprint_item(item: &MigrationItem) -> Result<Vec<u8>, Error> {
     fingerprint("migration-item", item)
 }
@@ -955,6 +1027,14 @@ async fn migration_report(
     let mut mappings = Vec::with_capacity(input.items.len());
     for (item, source) in input.items.iter().zip(&source_keys) {
         let mut conflicts = Vec::new();
+        if let Err(error) = validate_due(item.item.definition.schedule, item.item.due) {
+            conflicts.push(error.to_string());
+        }
+        if item.item.definition.schedule == Schedule::Instruction
+            && item.status != ItemStatus::NeedsAction
+        {
+            conflicts.push("instructions must remain active".into());
+        }
         if source_counts.get(source).is_some_and(|count| *count > 1) {
             conflicts.push("duplicate source identity in migration".into());
         }
@@ -1261,7 +1341,10 @@ mod tests {
                     Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap());
                 items.push(input);
             }
-            store.import(ImportCatalog { items }).await.unwrap();
+            store
+                .import(ImportCatalog { items }, Management::Owner)
+                .await
+                .unwrap();
         }
         let actor = Actor::System {
             id: SystemActor::Owner,
@@ -1773,7 +1856,7 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(
                 &upgraded
-                    .create(input.clone(), &actor, "old-create")
+                    .create(input.clone(), &actor, "old-create", Management::Owner)
                     .await
                     .unwrap()
             )
@@ -1840,7 +1923,7 @@ mod tests {
             name: "Home Assistant integration".into(),
         };
         let item = store
-            .create(input, &actor, "seed-reorder-plans")
+            .create(input, &actor, "seed-reorder-plans", Management::Owner)
             .await
             .unwrap();
         let mut sample = None;
@@ -1994,7 +2077,10 @@ mod tests {
                     input
                 })
                 .collect();
-            store.import(ImportCatalog { items }).await.unwrap();
+            store
+                .import(ImportCatalog { items }, Management::Owner)
+                .await
+                .unwrap();
         }
         let writer = store.clone();
         let mutations = tokio::spawn(async move {
@@ -2016,6 +2102,7 @@ mod tests {
                             ))),
                             ..Default::default()
                         },
+                        Management::Owner,
                     )
                     .await
                     .unwrap();
@@ -2061,6 +2148,9 @@ mod tests {
                 } else {
                     Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap())
                 };
+                if input.due.is_none() {
+                    input.definition.schedule = Schedule::Once;
+                }
                 let source = SourceRef {
                     system: "example-source".into(),
                     collection: "example-list".into(),
@@ -2090,7 +2180,12 @@ mod tests {
                     .bind(input.due.unwrap_or_else(|| NaiveDate::from_ymd_opt(2031,1,1).unwrap()).to_string()).bind("[]").execute(&legacy).await.unwrap();
             }
             store
-                .migrate(Migration { items }, &actor, &format!("seed-{batch}"))
+                .migrate(
+                    Migration { items },
+                    &actor,
+                    &format!("seed-{batch}"),
+                    Management::Owner,
+                )
                 .await
                 .unwrap();
         }
@@ -2345,5 +2440,221 @@ mod tests {
         }
         store.close().await.unwrap();
         legacy.close().await;
+    }
+    #[tokio::test]
+    async fn instruction_summary_filters_across_pages_without_changing_the_index_plan() {
+        // These are the exact 0.3 summary statements, retained only to compare the
+        // changed query against the same representative SQLite dataset.
+        const PREVIOUS_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' ORDER BY sort_due,id LIMIT 200";
+        const PREVIOUS_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' AND (sort_due,id)>(?,?) ORDER BY sort_due,id LIMIT 200";
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("instruction-plans.sqlite3"))
+            .await
+            .unwrap();
+        let seed: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let today = Utc::now().date_naive();
+        let mut inputs = Vec::new();
+        for index in 0..700 {
+            let mut input = seed.items[0].clone();
+            input.definition.timezone =
+                crate::models::TimeZone::try_from("Etc/UTC".to_owned()).unwrap();
+            if index < 300 {
+                input.id = format!("example-instruction-{index:03}")
+                    .try_into()
+                    .unwrap();
+                input.definition.schedule = Schedule::Instruction;
+                input.definition.checklist.clear();
+                input.definition.reorder_url = None;
+                input.due = None;
+            } else {
+                input.id = format!("example-task-{index:03}").try_into().unwrap();
+                input.definition.schedule = Schedule::Standing;
+                input.due = (index < 550).then_some(today);
+            }
+            inputs.push(input);
+        }
+        for items in inputs.chunks(200) {
+            store
+                .import(
+                    ImportCatalog {
+                        items: items.to_vec(),
+                    },
+                    Management::Owner,
+                )
+                .await
+                .unwrap();
+        }
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+        let mut evidence = Vec::new();
+        for (name, statement, continuation) in [
+            ("0.3 first page", PREVIOUS_FIRST, false),
+            ("0.4 first page", SUMMARY_FIRST, false),
+            ("0.3 continuation", PREVIOUS_NEXT, true),
+            ("0.4 continuation", SUMMARY_NEXT, true),
+        ] {
+            let mut explain = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+            explain.push(statement);
+            let mut query = explain.build();
+            if continuation {
+                query = query.bind(today.to_string()).bind("example-task-499");
+            }
+            let rows = query.fetch_all(store.pool()).await.unwrap();
+            let details: Vec<String> = rows.iter().map(|row| row.get("detail")).collect();
+            assert!(
+                details.iter().any(|line| line.contains("items_active_due")),
+                "{name}: {details:?}"
+            );
+            assert!(
+                !details
+                    .iter()
+                    .any(|line| line.starts_with("SCAN") || line.contains("TEMP B-TREE")),
+                "{name}: {details:?}"
+            );
+            evidence.push((name, details));
+        }
+        let mut measured = Vec::new();
+        for (version, first, next, expected) in [
+            ("0.3", PREVIOUS_FIRST, PREVIOUS_NEXT, 700),
+            ("0.4", SUMMARY_FIRST, SUMMARY_NEXT, 400),
+        ] {
+            let started = std::time::Instant::now();
+            let mut count = 0;
+            let mut after: Option<(String, String)> = None;
+            let mut pages = 0;
+            loop {
+                let mut query = sqlx::query(if after.is_some() { next } else { first });
+                if let Some((due, id)) = &after {
+                    query = query.bind(due).bind(id);
+                }
+                let rows = query.fetch_all(store.pool()).await.unwrap();
+                count += rows.len();
+                pages += 1;
+                if rows.len() < 200 {
+                    break;
+                }
+                after = rows.last().map(|row| {
+                    (
+                        row.get::<Option<String>, _>("due")
+                            .unwrap_or_else(|| "9999-12-31".into()),
+                        row.get("id"),
+                    )
+                });
+            }
+            assert_eq!(count, expected);
+            measured.push((version, count, pages, started.elapsed().as_micros()));
+        }
+        let summary = store.summary().await.unwrap();
+        assert_eq!(summary.active, 400);
+        assert_eq!(summary.due_soon, 250);
+        assert_eq!(summary.overdue, 0);
+        assert_eq!(summary.completed, 0);
+        let evidence = serde_json::to_string_pretty(&(evidence, measured)).unwrap();
+        println!("{evidence}");
+        if let Ok(path) = std::env::var("MAINTENANCE_INSTRUCTION_QUERY_PLAN_OUTPUT") {
+            std::fs::write(path, evidence).unwrap();
+        }
+        store.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn legacy_undated_recurrence_preserves_facts_and_acknowledgements_until_deliberate_correction()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy-undated.sqlite3");
+        let original = Store::open(&path).await.unwrap();
+        let catalog: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let mut input = catalog.items[0].clone();
+        input.due = None;
+        let actor = Actor::System {
+            id: SystemActor::Owner,
+            name: "Owner credential".into(),
+        };
+        // The 0.3 schema and storage producer allowed this definition. Seed its
+        // original item and receipt using those unchanged persistence functions.
+        let mut transaction = original.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        insert_item(&mut transaction, &input).await.unwrap();
+        let receipt = get_item(&mut transaction, &input.id).await.unwrap();
+        save_replay(
+            &mut transaction,
+            &actor,
+            "legacy-create",
+            &create_fingerprint(&input).unwrap(),
+            &receipt,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        original.close().await.unwrap();
+        let upgraded = Store::open(&path).await.unwrap();
+        let current = upgraded.get(&input.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_vec(&current).unwrap(),
+            serde_json::to_vec(&receipt).unwrap()
+        );
+        assert!(matches!(
+            upgraded
+                .create(
+                    input.clone(),
+                    &actor,
+                    "fresh-invalid-create",
+                    Management::Owner
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        assert!(matches!(
+            upgraded
+                .update(
+                    &input.id,
+                    current.revision,
+                    UpdateItem {
+                        summary: crate::models::Change(Some("Date still unknown".into())),
+                        ..Default::default()
+                    },
+                    Management::Owner
+                )
+                .await,
+            Err(Error::Invalid(_))
+        ));
+        let completed = upgraded
+            .complete(
+                &input.id,
+                current.revision,
+                CompleteItem {
+                    occurrence_id: current.occurrence.id,
+                },
+                &actor,
+                "known-completion",
+            )
+            .await
+            .unwrap();
+        assert!(completed.occurrence.due.is_some());
+        let event = completed.last_completion.as_ref().unwrap();
+        assert!(event.completed_at.is_some());
+        assert!(event.previous_due.is_none());
+        let replayed = upgraded
+            .create(input, &actor, "legacy-create", Management::Owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&replayed).unwrap(),
+            serde_json::to_vec(&receipt).unwrap()
+        );
+        let current = upgraded.get(&completed.id).await.unwrap();
+        assert_eq!(
+            serde_json::to_vec(&current).unwrap(),
+            serde_json::to_vec(&completed).unwrap()
+        );
+        assert_eq!(
+            upgraded
+                .events(&completed.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        upgraded.close().await.unwrap();
     }
 }

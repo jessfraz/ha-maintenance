@@ -599,6 +599,51 @@ for kind in once standing completed; do
 done
 request GET /v1/items/example-migrated-completed/events 200 --header "Authorization: Bearer $token"
 cmp --silent "$scratch/migration-history.json" "$scratch/response.json"
+
+# Recurring work needs an explicit first date, even outside the browser.
+request POST /v1/items 400 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-undated-recurring' \
+    --data '{"id":"example-undated-recurring","name":"Example recurring work","summary":"Inspect example equipment","timezone":"Etc/UTC","schedule":{"kind":"recurring","interval":{"days":7}}}'
+request GET /v1/items/example-undated-recurring 404 --header "Authorization: Bearer $token"
+
+request POST /v1/items 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-instruction' \
+    --data '{"id":"example-instruction","name":"Example care guidance","summary":"Keep example equipment dry","description":"Use a dry cloth. Keep liquids away.","timezone":"Etc/UTC","schedule":{"kind":"instruction"}}'
+instruction_revision=$(etag)
+instruction_occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
+cp "$scratch/response.json" "$scratch/instruction.json"
+instruction_body=$(jq --compact-output --null-input --arg occurrence "$instruction_occurrence" '{occurrence_id:$occurrence}')
+request POST /v1/items/example-instruction/completions 409 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-instruction-completion' \
+    --header "If-Match: $instruction_revision" --data "$instruction_body"
+for method in PATCH PUT; do
+    instruction_path=/v1/items/example-instruction
+    instruction_data=()
+    if [[ $method == PATCH ]]; then
+        instruction_data=(--data '{"schedule":{"kind":"once"}}')
+    else
+        instruction_path+=/archive
+    fi
+    request "$method" "$instruction_path" 403 \
+        --header "Authorization: Bearer $integration_token" \
+        --header 'X-Maintenance-Actor-Id: ha:example-admin' \
+        --header 'X-Maintenance-Admin: true' \
+        --header 'Content-Type: application/json' \
+        --header "If-Match: $instruction_revision" "${instruction_data[@]}"
+done
+stop_container
+start_container
+request GET /v1/items/example-instruction 200 --header "Authorization: Bearer $token"
+cmp --silent "$scratch/instruction.json" "$scratch/response.json"
+request PUT /v1/items/example-instruction/archive 200 \
+    --header "Authorization: Bearer $token" --header "If-Match: $instruction_revision"
+jq --exit-status '.archived == true and .schedule.kind == "instruction"' "$scratch/response.json" >/dev/null
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, undated once/standing tasks, restart, and cold backup/restore."
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, strict recurring dates, protected instructions, restart, and cold backup/restore."
