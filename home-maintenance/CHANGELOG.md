@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.2
+
+- Keep task actions, editor buttons, and form fields at least 44 pixels tall, including small remove and reorder controls.
+- Cover the native task and editor touch targets in Chromium at phone, tablet, and desktop widths.
+
 ## 0.10.1
 
 - Give task details and search controls a single column on phones so dates and time zones stay readable.
