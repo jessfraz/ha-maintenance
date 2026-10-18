@@ -2,9 +2,11 @@
 
 ## 0.5.0
 
+- Add a Home Assistant task-list card with current status and due dates. Each row opens the exact task in Maintenance through authenticated ingress and preserves it through login.
+- Load the card automatically with the integration and support active, upcoming, overdue, and completed views.
 - Link each maintenance item to multiple Home Assistant devices and entities, with the same objects shared across tasks.
 - Choose links by name or entity ID in the editor. Stable registry IDs preserve associations through renames; missing and disabled objects retain their links.
-- Open linked objects in HA and include their links in native to-do and calendar descriptions.
+- Open linked objects in HA and include links in native to-do descriptions. Calendar descriptions show names and page URLs in HA's plain-text event dialog.
 - Keep the bounded registry catalog in memory and persist only explicitly selected references. Offline, unavailable, and foreign-instance links remain visible for repair.
 
 ## 0.4.0
