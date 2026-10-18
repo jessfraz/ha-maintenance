@@ -58,6 +58,7 @@ a {
   -webkit-tap-highlight-color: transparent;
 }
 button {
+  min-width: 44px;
   min-height: 44px;
   background: var(--accent);
   color: var(--on-accent);
@@ -114,6 +115,10 @@ textarea {
   padding: 11px 12px;
   background: var(--paper);
   color: inherit;
+}
+input:not([type="checkbox"]):not([type="radio"]),
+select {
+  min-height: 44px;
 }
 input:disabled {
   color: var(--muted);
@@ -714,9 +719,6 @@ dialog .dialog-heading h2 {
   align-items: center;
   gap: 10px;
   margin: 26px 0 0;
-}
-.actions button {
-  min-height: 42px;
 }
 .actions .archive-action {
   margin-left: auto;

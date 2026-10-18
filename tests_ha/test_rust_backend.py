@@ -20,6 +20,7 @@ from homeassistant.helpers import instance_id
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util.json import JsonObjectType
+from playwright.async_api import async_playwright, expect
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
@@ -52,6 +53,106 @@ class RustBackend:
     origin: str
     owner_token: str = field(repr=False)
     integration_token: str = field(repr=False)
+
+
+@pytest.mark.parametrize(
+    ("width", "height"), [(390, 844), (1024, 1366), (1366, 1024), (1440, 900)]
+)
+async def test_native_app_touch_targets(
+    hass: HomeAssistant,
+    rust_backend: RustBackend,
+    tmp_path: Path,
+    width: int,
+    height: int,
+) -> None:
+    """Measure the real task actions and editor, including narrow icon controls."""
+    async with async_get_clientsession(hass).post(
+        f"{rust_backend.origin}/v1/items",
+        headers={
+            "Authorization": f"Bearer {rust_backend.owner_token}",
+            "Idempotency-Key": "example-touch-targets",
+        },
+        json={
+            "id": "example-filter",
+            "name": "Example filter",
+            "summary": "Inspect the example filter",
+            "timezone": "UTC",
+            "due": "2031-02-17",
+            "schedule": {
+                "kind": "recurring",
+                "interval": {"days": 14, "months": 0, "years": 0},
+            },
+            "checklist": [
+                {"id": STEP_ID, "summary": "Inspect the example part"},
+                {"id": SECOND_STEP_ID, "summary": "Clean the example part"},
+            ],
+            "specs": [{"label": "Example material", "value": "Example alloy"}],
+            "resources": [
+                {"label": "Example guide", "url": "https://example.com/guide"}
+            ],
+        },
+    ) as response:
+        assert response.status == 201
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            page = await browser.new_page(viewport={"width": width, "height": height})
+            await page.goto(rust_backend.origin)
+            await page.get_by_label("API token", exact=True).fill(
+                rust_backend.owner_token
+            )
+            await page.get_by_role("button", name="Connect", exact=True).click()
+            await page.get_by_role(
+                "link", name="Inspect the example filter", exact=True
+            ).click()
+            detail = page.get_by_role(
+                "dialog", name="Inspect the example filter", exact=True
+            )
+            await expect(detail).to_be_visible()
+            measurements: list[tuple[str, float, float]] = []
+            for button in await detail.locator("button:visible").all():
+                await button.scroll_into_view_if_needed()
+                box = await button.bounding_box()
+                assert box is not None
+                label = await button.get_attribute("aria-label")
+                measurements.append(
+                    (label or await button.inner_text(), box["width"], box["height"])
+                )
+            await page.screenshot(path=str(tmp_path / "task-actions.png"))
+            await detail.get_by_role("button", name="Edit", exact=True).click()
+            editor = page.get_by_role("dialog", name="Edit maintenance item")
+            await expect(editor).to_be_visible()
+            controls = editor.locator(
+                'button:visible, input:not([type="checkbox"]):not([type="radio"])'
+                ":visible, select:visible"
+            )
+            for control in await controls.all():
+                await control.scroll_into_view_if_needed()
+                box = await control.bounding_box()
+                assert box is not None
+                label = await control.get_attribute("aria-label")
+                name = await control.get_attribute("name")
+                measurements.append(
+                    (
+                        label or name or await control.inner_text(),
+                        box["width"],
+                        box["height"],
+                    )
+                )
+            await editor.get_by_role(
+                "button", name="Save changes"
+            ).scroll_into_view_if_needed()
+            await page.screenshot(path=str(tmp_path / "editor-controls.png"))
+            assert not await editor.evaluate(
+                "dialog => dialog.scrollWidth > dialog.clientWidth"
+            )
+            undersized = [
+                value for value in measurements if value[1] < 44 or value[2] < 44
+            ]
+            assert not undersized, undersized
+        finally:
+            await browser.close()
 
 
 @pytest.fixture
