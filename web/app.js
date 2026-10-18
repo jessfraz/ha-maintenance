@@ -276,9 +276,7 @@ function haReferenceDescription(reference) {
 function haReferenceLink(reference) {
   const target = haTarget(reference);
   if (!haRegistryReady() || !target) return null;
-  const sameOrigin = isIngress && (!haRegistry.base_url ||
-    new URL(haRegistry.base_url).origin === location.origin);
-  const origin = sameOrigin ? location.origin : haRegistry.base_url;
+  const origin = isIngress ? location.origin : haRegistry.base_url;
   if (!origin) return null;
   let path;
   if (target.kind === "device") {
@@ -288,13 +286,13 @@ function haReferenceLink(reference) {
       "more-info-entity-id": target.entity_id,
       "more-info-view": target.disabled ? "settings" : "info",
     });
-    const route = sameOrigin && parentPrefix
+    const route = isIngress && parentPrefix
       ? `${parentPrefix}/${selected ? itemPath(selected.id) : ""}`
       : "/";
     path = `${route}?${params}`;
   }
   const link = safeLink(new URL(path, origin).href, target.name);
-  if (link && sameOrigin && parentPrefix) {
+  if (link && isIngress && parentPrefix) {
     link.addEventListener("click", (event) => {
       if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
         return;
