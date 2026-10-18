@@ -175,6 +175,35 @@ or integration actions; edit definitions in the dashboard. It uses the shared
 60-second poll and refreshes after integration actions. A service outage marks
 the calendar unavailable instead of returning stale events as current data.
 
+## Assist
+
+Expose the Maintenance to-do entity to Assist in **Settings → Voice assistants →
+Expose**. The integration adds English commands to Home Assistant's built-in
+conversation agent:
+
+- "What maintenance is coming up?"
+- "What maintenance is overdue?"
+- "What is my next maintenance task?"
+- "What maintenance is due today?" Also accepts tomorrow, this week, or next week.
+- "Complete maintenance task replace the example filter."
+
+Queries refresh the app's data before answering and read at most five tasks
+with their due dates. Upcoming includes future work beyond the dashboard's
+14-day window; next includes overdue work. Date windows use each task's time
+zone, with weeks running Monday through Sunday. Undated tasks and standing
+instructions are excluded from date queries.
+
+Completion accepts a task's name or action summary, including a unique partial
+name. If several tasks match, Assist reads their names without completing any.
+Repeat the command with a more specific name. It does not remember "that one"
+or "the first one" between commands. Undated tasks can be completed by name;
+standing instructions cannot.
+
+Authenticated users need permission to read or control the exposed to-do
+entity. Voice requests without a user identity are recorded as automation
+actions. Completion uses the same occurrence and revision checks as the
+dashboard; a concurrent change requires a fresh command.
+
 ## NFC tags
 
 Open the item and copy its stable authenticated app route to the tag:
@@ -205,7 +234,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.6.1
+  ghcr.io/jessfraz/ha-maintenance:0.7.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

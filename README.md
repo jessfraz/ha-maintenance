@@ -61,6 +61,7 @@ The integration registers the card automatically. It also provides:
 - A [read-only calendar](home-maintenance/DOCS.md#calendar) of current due dates.
 - Sensors for active, overdue, and upcoming tasks, plus completion counts.
 - Actions to check steps and complete work.
+- [Local Assist commands](home-maintenance/DOCS.md#assist) for due dates and named task completion.
 
 The app opens through authenticated ingress and requires a Home Assistant
 administrator. Other users can complete work through the native to-do list and

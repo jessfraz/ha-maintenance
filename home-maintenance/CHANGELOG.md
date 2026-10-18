@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- Ask local Assist about upcoming, overdue, and next maintenance tasks, or work due today, tomorrow, this week, or next week.
+- Complete a task by name or action summary. Ambiguous names prompt for a more specific command without changing any tasks.
+- Respect Assist exposure and user permissions, refresh before answering, and protect completion with occurrence, revision, and retry checks.
+
 ## 0.6.1
 
 - Close task and edit dialogs when clicking or tapping outside them.

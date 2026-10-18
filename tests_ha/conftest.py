@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant, ServiceResponse
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.setup import async_setup_component
 from homeassistant.util.json import JsonObjectType
 from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
@@ -168,6 +169,7 @@ class Backend:
     )
     role: str = "integration"
     delay_seconds: float = 0
+    request_received: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def handle(self, request: web.Request) -> web.Response:
         self.requests.append(
@@ -179,6 +181,7 @@ class Backend:
                 await request.read(),
             )
         )
+        self.request_received.set()
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
         if response := self.responses.get((request.method, request.path)):
@@ -198,6 +201,12 @@ class Backend:
 @pytest.fixture(autouse=True)
 def custom_integrations(enable_custom_integrations: None) -> None:
     """Enable the integration from this checkout."""
+
+
+@pytest.fixture(autouse=True)
+async def core_component(hass: HomeAssistant) -> None:
+    """Initialize Core's exposure registry before loading conversation."""
+    assert await async_setup_component(hass, "homeassistant", {})
 
 
 @pytest.fixture(autouse=True)
