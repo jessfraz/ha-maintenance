@@ -2026,10 +2026,16 @@ mod tests {
                         "{name}: {details:?}"
                     );
                     if name == "reorder first page" || name == "reorder continuation" {
+                        // sequence aliases rowid. For this continuation's remaining
+                        // 300 rows, SQLite may prefer that ordered range seek to
+                        // secondary-index lookups for the 100 pending receipts.
+                        let sequence_seek = name == "reorder continuation"
+                            && details == ["SEARCH reorders USING INTEGER PRIMARY KEY (rowid>?)"];
                         assert!(
-                            details
-                                .iter()
-                                .any(|line| line.contains("reorders_status_sequence")),
+                            sequence_seek
+                                || details
+                                    .iter()
+                                    .any(|line| line.contains("reorders_status_sequence")),
                             "{details:?}"
                         );
                     } else if name != "reorder insertion" {
@@ -2054,6 +2060,22 @@ mod tests {
             .unwrap();
         assert_eq!(page.items.len(), 100);
         assert!(page.next_page.is_some());
+        let continuation: Vec<ReorderRow> = sqlx::query_as(REORDER_LIST_NEXT)
+            .bind("pending")
+            .bind(300)
+            .bind(101)
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(continuation.len(), 100);
+        assert_eq!(continuation.first().unwrap().sequence, 301);
+        assert_eq!(continuation.last().unwrap().sequence, 598);
+        assert!(continuation.iter().all(|row| row.status == "pending"));
+        assert!(
+            continuation
+                .windows(2)
+                .all(|rows| rows[1].sequence - rows[0].sequence == 3)
+        );
         let report = serde_json::to_string_pretty(&evidence).unwrap();
         println!("{report}");
         if let Ok(path) = std::env::var("MAINTENANCE_REORDER_QUERY_PLAN_OUTPUT") {
