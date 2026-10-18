@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Close task and edit dialogs when clicking or tapping outside them.
+- Keep edits open while saving and ignore drags that start or end inside a dialog.
+
 ## 0.6.0
 
 - Move summary filters below the Queue heading and use the same status colors as Shipments, including dark mode.

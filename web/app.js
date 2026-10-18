@@ -1738,12 +1738,43 @@ byId("detail").addEventListener("cancel", (event) => {
   closeDetail();
 });
 byId("more-events").addEventListener("click", () => loadEvents());
-byId("close-editor").addEventListener("click", () => {
+function closeEditor() {
   if (!editorBusy) byId("editor").close();
-});
+}
+byId("close-editor").addEventListener("click", closeEditor);
 byId("editor").addEventListener("cancel", (event) => {
   if (editorBusy) event.preventDefault();
 });
+
+// Both pointer endpoints must be outside. Close on click so the completed
+// gesture cannot activate a control underneath the dialog.
+function dismissOnBackdrop(dialog, close) {
+  let outsidePointer = null;
+  const outside = (event) => {
+    const bounds = dialog.getBoundingClientRect();
+    return event.target === dialog && (
+      event.clientX < bounds.left || event.clientX >= bounds.right ||
+      event.clientY < bounds.top || event.clientY >= bounds.bottom
+    );
+  };
+  dialog.addEventListener("pointerdown", (event) => {
+    outsidePointer = event.isPrimary && event.button === 0 && outside(event)
+      ? event.pointerId : null;
+  });
+  dialog.addEventListener("pointerup", (event) => {
+    if (outsidePointer !== event.pointerId || !outside(event))
+      outsidePointer = null;
+  });
+  dialog.addEventListener("click", (event) => {
+    const dismiss = outsidePointer !== null && event.button === 0 && outside(event);
+    outsidePointer = null;
+    if (dismiss) close();
+  });
+  for (const type of ["pointercancel", "close"])
+    dialog.addEventListener(type, () => { outsidePointer = null; });
+}
+dismissOnBackdrop(byId("detail"), closeDetail);
+dismissOnBackdrop(byId("editor"), closeEditor);
 byId("edit-form").addEventListener("submit", guarded(saveItem, "edit-error"));
 byId("reload-edit").addEventListener(
   "click",
