@@ -98,6 +98,7 @@ async def test_native_entities_follow_the_entire_inventory(
         {"items": [item_record(), item_record()], "next_page": None},
         {"items": [{**item_record(), "revision": True}], "next_page": None},
         {"items": [{**item_record(), "status": "unknown"}], "next_page": None},
+        {"items": [item_record(timezone="Not/A-Timezone")], "next_page": None},
         {
             "items": [{**item_record(), "schedule": {"kind": "unknown"}}],
             "next_page": None,
@@ -127,6 +128,7 @@ async def test_native_entities_follow_the_entire_inventory(
         "duplicate-id",
         "invalid-revision",
         "invalid-status",
+        "invalid-timezone",
         "invalid-schedule",
         "naive-completion-time",
         "missing-nullable-due",

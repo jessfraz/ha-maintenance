@@ -111,9 +111,13 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             self.hass, self.async_report_registry(), "Maintenance registry update"
         )
 
-    def item_description(self, item: MaintenanceItem) -> str | None:
-        """Use the same description for native display and native completion checks."""
-        links = describe_references(self.hass, self._instance_id, item.home_assistant)
+    def item_description(
+        self, item: MaintenanceItem, *, markdown: bool = True
+    ) -> str | None:
+        """Append references using each native platform's text format."""
+        links = describe_references(
+            self.hass, self._instance_id, item.home_assistant, markdown=markdown
+        )
         return (
             "\n\n".join(
                 section for section in (item.task_description, links) if section
@@ -197,8 +201,13 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             data = response.json()
             if not isinstance(data, dict) or not isinstance(data.get("items"), list):
                 raise ValueError("Invalid item page")
-            for record in data["items"]:
-                item = MaintenanceItem.parse(record)
+            # ZoneInfo can read an uncached IANA timezone from disk.
+            page_items = await self.hass.async_add_executor_job(
+                lambda records=data["items"]: tuple(
+                    MaintenanceItem.parse(record) for record in records
+                )
+            )
+            for item in page_items:
                 if item.id in seen_ids or item.occurrence_id in seen_occurrences:
                     raise ValueError("Duplicate item or occurrence in backend pages")
                 seen_ids.add(item.id)

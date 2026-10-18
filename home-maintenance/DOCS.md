@@ -76,7 +76,8 @@ entity ID. Link as many as needed, then save. The same device or entity can be
 linked to other maintenance items. Use **Remove** beside a link to detach it.
 
 Device links open HA's device page; entity links open its native more-info
-dialog. They also appear in to-do and calendar descriptions. Renaming an entity
+dialog. To-do descriptions include these links. Calendar descriptions include
+names and page URLs; HA's event dialog displays plain text. Renaming an entity
 preserves its association. Removed objects and references to another HA
 instance remain visible for repair. If HA is unavailable, saved associations
 are preserved and can still be removed. Update the app and integration together
@@ -121,6 +122,35 @@ API clients change a step with
 `occurrence_id` and `completed` boolean. Supply the item's ETag in `If-Match`
 and a stable `Idempotency-Key`, as for completing an occurrence. A stale
 occurrence or revision is rejected rather than applying the change to new work.
+
+## Dashboard card
+
+The integration includes a task-list card whose rows open the matching item in
+Maintenance. Use it in place of HA's native to-do card when tapping a task should
+open its details, checklist, and history in the app:
+
+```yaml
+type: custom:maintenance-task-list
+title: Maintenance
+view: active
+limit: 100
+```
+
+For an upcoming card, use `view: upcoming` and optionally `days: 14`. Views are
+`active`, `upcoming`, `overdue`, and `completed`. Upcoming includes today through
+the chosen number of days, using each task's time zone. Undated tasks appear in
+Active. Archived tasks and standing instructions are excluded. `days` accepts
+1–365 and `limit` accepts 1–100; defaults are Upcoming, 14 days, and 20 tasks.
+
+The card reads current status and due dates from the app when it loads, every
+minute, and when **Refresh** is pressed. It registers its JavaScript resource
+automatically. Update both the app and integration, restart Home Assistant,
+then refresh the browser before adding it. No manual resource URL is needed.
+
+Task links use `/app/<repository-app-slug>/items/<stable-item-id>`, preserving
+the selected item through ingress navigation or login. App access requires a
+Home Assistant administrator; other authenticated users can read the card.
+Standalone connections show task status without app navigation.
 
 ## Calendar
 

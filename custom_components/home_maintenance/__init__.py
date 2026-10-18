@@ -1,5 +1,10 @@
 """Home Assistant adapter for the local Maintenance service."""
 
+from pathlib import Path
+from urllib.parse import urlencode
+
+from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
@@ -7,6 +12,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
+from .card import MaintenanceCardView
 from .client import MaintenanceClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 from .coordinator import MaintenanceCoordinator
@@ -20,6 +26,21 @@ type MaintenanceConfigEntry = ConfigEntry[MaintenanceCoordinator]
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Install the authenticated view once, independent of reloads."""
     hass.http.register_view(MaintenanceView(hass))
+    hass.http.register_view(MaintenanceCardView(hass))
+    integration = await async_get_integration(hass, DOMAIN)
+    resource_path = f"/{DOMAIN}/maintenance-task-list.js"
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                resource_path,
+                str(Path(__file__).parent / "frontend" / "maintenance-task-list.js"),
+                True,
+            ),
+        ]
+    )
+    frontend.add_extra_js_url(
+        hass, resource_path + "?" + urlencode({"v": str(integration.version)})
+    )
     async_register_services(hass)
     return True
 
