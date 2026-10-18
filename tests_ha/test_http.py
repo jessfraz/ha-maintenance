@@ -38,6 +38,7 @@ async def test_authentication_and_human_attribution(
             "X-Maintenance-Actor-Id": "forged-user",
             "X-Maintenance-Actor-Name": "Forged Name",
             "X-Maintenance-Admin": "true",
+            "X-Maintenance-Owner": "true",
             "X-Maintenance-System-Actor": "forged-system",
             "Authorization": f"Bearer {hass_user_token}",
         },
@@ -50,6 +51,7 @@ async def test_authentication_and_human_attribution(
     assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_user.id}"
     assert forwarded.headers["X-Maintenance-Actor-Name"] == hass_user.name
     assert "X-Maintenance-Admin" not in forwarded.headers
+    assert "X-Maintenance-Owner" not in forwarded.headers
     assert "X-Maintenance-System-Actor" not in forwarded.headers
     assert forwarded.headers["If-Match"] == '"1"'
     assert forwarded.headers["Idempotency-Key"] == "complete-one"
@@ -88,6 +90,32 @@ async def test_only_admin_can_change_definitions_or_resolve_reorders(
     )
     assert forwarded.headers["X-Maintenance-Admin"] == "true"
     assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_admin_user.id}"
+    assert "X-Maintenance-Owner" not in forwarded.headers
+
+
+async def test_owner_claim_comes_only_from_verified_ha_owner(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_owner_user: MockUser,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    refresh_token = await hass.auth.async_create_refresh_token(
+        hass_owner_user, client_id="https://example.invalid"
+    )
+    client = await hass_client(hass.auth.async_create_access_token(refresh_token))
+    response = await client.patch(
+        f"{PREFIX}/items/{ITEM_ID}",
+        json={},
+        headers={"X-Maintenance-Actor-Id": "forged", "X-Maintenance-Owner": "false"},
+    )
+    assert response.status == 200
+    forwarded = next(
+        request for request in backend.requests if request.method == "PATCH"
+    )
+    assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_owner_user.id}"
+    assert forwarded.headers["X-Maintenance-Admin"] == "true"
+    assert forwarded.headers["X-Maintenance-Owner"] == "true"
 
 
 @pytest.mark.parametrize(

@@ -23,7 +23,7 @@ use crate::{
         MigrationReport, Page, Reorder, ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder,
         SetChecklistStep, Summary, SystemActor, UpdateItem,
     },
-    store::Store,
+    store::{Management, Store},
 };
 
 #[derive(Clone)]
@@ -63,6 +63,16 @@ struct Principal {
     actor: Actor,
     admin: bool,
     role: Role,
+    is_owner: bool,
+}
+impl Principal {
+    fn management(&self) -> Management {
+        if self.is_owner {
+            Management::Owner
+        } else {
+            Management::Administrator
+        }
+    }
 }
 fn fail(status: Status, message: &str) -> HttpError {
     HttpError::for_client_error(None, status, message.into())
@@ -99,7 +109,7 @@ fn user_actor(id: &str, name: &str) -> Result<Actor, HttpError> {
         name: name.into(),
     })
 }
-fn authenticate(request: &RequestContext<Arc<Context>>) -> Result<Principal, HttpError> {
+async fn authenticate(request: &RequestContext<Arc<Context>>) -> Result<Principal, HttpError> {
     let context = request.context();
     if context.ingress_peer.is_some() {
         ingress_access(request)?;
@@ -119,6 +129,7 @@ fn authenticate(request: &RequestContext<Arc<Context>>) -> Result<Principal, Htt
             actor: user_actor(&format!("ha:{id}"), name)?,
             admin: true,
             role: Role::Owner,
+            is_owner: context.installation.is_owner(id).await,
         });
     }
     let token = header(request, "authorization")
@@ -135,6 +146,7 @@ fn authenticate(request: &RequestContext<Arc<Context>>) -> Result<Principal, Htt
             },
             admin: true,
             role: Role::Owner,
+            is_owner: true,
         });
     }
     if !context
@@ -188,10 +200,11 @@ fn authenticate(request: &RequestContext<Arc<Context>>) -> Result<Principal, Htt
         actor,
         admin,
         role: Role::Integration,
+        is_owner: admin && header(request, "x-maintenance-owner") == Some("true"),
     })
 }
-fn administrator(request: &RequestContext<Arc<Context>>) -> Result<Principal, HttpError> {
-    let principal = authenticate(request)?;
+async fn administrator(request: &RequestContext<Arc<Context>>) -> Result<Principal, HttpError> {
+    let principal = authenticate(request).await?;
     if !principal.admin {
         return Err(fail(Status::FORBIDDEN, "administrator access required"));
     }
@@ -319,7 +332,7 @@ async fn items_list(
     request: RequestContext<Arc<Context>>,
     query: Query<ListQuery>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<Page<Item>>, PrivateHeaders>, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     let query = query.into_inner();
     Ok(private(
         request
@@ -339,11 +352,16 @@ async fn items_create(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<CreateItem>,
 ) -> Result<HttpResponseHeaders<HttpResponseCreated<Item>, ItemHeaders>, HttpError> {
-    let principal = administrator(&request)?;
+    let principal = administrator(&request).await?;
     let item = request
         .context()
         .store
-        .create(body.into_inner(), &principal.actor, idempotency(&request)?)
+        .create(
+            body.into_inner(),
+            &principal.actor,
+            idempotency(&request)?,
+            principal.management(),
+        )
         .await?;
     let headers = item_headers(&item);
     Ok(HttpResponseHeaders::new(HttpResponseCreated(item), headers))
@@ -354,9 +372,13 @@ async fn items_import(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<ImportCatalog>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<Page<Item>>, PrivateHeaders>, HttpError> {
-    administrator(&request)?;
+    let principal = administrator(&request).await?;
     Ok(private(
-        request.context().store.import(body.into_inner()).await?,
+        request
+            .context()
+            .store
+            .import(body.into_inner(), principal.management())
+            .await?,
     ))
 }
 /// Read-only, target-aware mapping and conflict report for a migration.
@@ -365,7 +387,7 @@ async fn migration_preview(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<Migration>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<MigrationReport>, PrivateHeaders>, HttpError> {
-    administrator(&request)?;
+    administrator(&request).await?;
     Ok(private(
         request
             .context()
@@ -380,11 +402,16 @@ async fn migration_apply(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<Migration>,
 ) -> Result<HttpResponseHeaders<HttpResponseCreated<MigrationReport>, PrivateHeaders>, HttpError> {
-    let principal = administrator(&request)?;
+    let principal = administrator(&request).await?;
     let report = request
         .context()
         .store
-        .migrate(body.into_inner(), &principal.actor, idempotency(&request)?)
+        .migrate(
+            body.into_inner(),
+            &principal.actor,
+            idempotency(&request)?,
+            principal.management(),
+        )
         .await?;
     Ok(HttpResponseHeaders::new(
         HttpResponseCreated(report),
@@ -398,7 +425,7 @@ async fn item_get(
     request: RequestContext<Arc<Context>>,
     path: Path<ItemPath>,
 ) -> Result<ItemResponse, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     Ok(item_response(
         request.context().store.get(&path.into_inner().id).await?,
     ))
@@ -410,7 +437,7 @@ async fn item_update(
     path: Path<ItemPath>,
     body: TypedBody<UpdateItem>,
 ) -> Result<ItemResponse, HttpError> {
-    administrator(&request)?;
+    let principal = administrator(&request).await?;
     Ok(item_response(
         request
             .context()
@@ -419,6 +446,7 @@ async fn item_update(
                 &path.into_inner().id,
                 revision(&request)?,
                 body.into_inner(),
+                principal.management(),
             )
             .await?,
     ))
@@ -430,7 +458,7 @@ async fn item_complete(
     path: Path<ItemPath>,
     body: TypedBody<CompleteItem>,
 ) -> Result<ItemResponse, HttpError> {
-    let principal = authenticate(&request)?;
+    let principal = authenticate(&request).await?;
     Ok(item_response(
         request
             .context()
@@ -453,7 +481,7 @@ async fn item_reorder(
     path: Path<ItemPath>,
     body: TypedBody<ReorderItem>,
 ) -> Result<HttpResponseHeaders<HttpResponseCreated<ReorderReceipt>, PrivateHeaders>, HttpError> {
-    let principal = authenticate(&request)?;
+    let principal = authenticate(&request).await?;
     let receipt = request
         .context()
         .store
@@ -478,7 +506,7 @@ async fn reorders_list(
     request: RequestContext<Arc<Context>>,
     query: Query<ReorderQuery>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<Page<Reorder>>, PrivateHeaders>, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     let query = query.into_inner();
     Ok(private(
         request
@@ -497,7 +525,7 @@ async fn reorder_get(
     request: RequestContext<Arc<Context>>,
     path: Path<ReorderPath>,
 ) -> Result<ReorderResponse, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     Ok(reorder_response(
         request
             .context()
@@ -514,7 +542,7 @@ async fn reorder_resolve(
     path: Path<ReorderPath>,
     body: TypedBody<ResolveReorder>,
 ) -> Result<ReorderResponse, HttpError> {
-    let principal = administrator(&request)?;
+    let principal = administrator(&request).await?;
     Ok(reorder_response(
         request
             .context()
@@ -535,7 +563,7 @@ async fn checklist_step_set(
     path: Path<ChecklistPath>,
     body: TypedBody<SetChecklistStep>,
 ) -> Result<ItemResponse, HttpError> {
-    let principal = authenticate(&request)?;
+    let principal = authenticate(&request).await?;
     let path = path.into_inner();
     Ok(item_response(
         request
@@ -557,12 +585,17 @@ async fn item_archive(
     request: RequestContext<Arc<Context>>,
     path: Path<ItemPath>,
 ) -> Result<ItemResponse, HttpError> {
-    administrator(&request)?;
+    let principal = administrator(&request).await?;
     Ok(item_response(
         request
             .context()
             .store
-            .archive(&path.into_inner().id, revision(&request)?, true)
+            .archive(
+                &path.into_inner().id,
+                revision(&request)?,
+                true,
+                principal.management(),
+            )
             .await?,
     ))
 }
@@ -571,12 +604,17 @@ async fn item_restore(
     request: RequestContext<Arc<Context>>,
     path: Path<ItemPath>,
 ) -> Result<ItemResponse, HttpError> {
-    administrator(&request)?;
+    let principal = administrator(&request).await?;
     Ok(item_response(
         request
             .context()
             .store
-            .archive(&path.into_inner().id, revision(&request)?, false)
+            .archive(
+                &path.into_inner().id,
+                revision(&request)?,
+                false,
+                principal.management(),
+            )
             .await?,
     ))
 }
@@ -586,7 +624,7 @@ async fn item_events(
     path: Path<ItemPath>,
     query: Query<EventQuery>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<Page<Completion>>, PrivateHeaders>, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     let query = query.into_inner();
     Ok(private(
         request
@@ -604,7 +642,7 @@ async fn item_events(
 async fn summary(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<Summary>, PrivateHeaders>, HttpError> {
-    authenticate(&request)?;
+    authenticate(&request).await?;
     Ok(private(request.context().store.summary().await?))
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -612,31 +650,33 @@ pub struct System {
     pub version: String,
     pub credential_role: Role,
     pub integration_connected: bool,
+    pub can_manage_instructions: bool,
 }
 #[endpoint {method=GET,path="/v1/system",tags=["system"]}]
 async fn system(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<System>, PrivateHeaders>, HttpError> {
-    let principal = authenticate(&request)?;
+    let principal = authenticate(&request).await?;
     let report = request.context().installation.report().await;
     Ok(private(System {
         version: env!("CARGO_PKG_VERSION").into(),
         credential_role: principal.role,
         integration_connected: report.integration_connected,
+        can_manage_instructions: principal.is_owner,
     }))
 }
 #[endpoint {method=GET,path="/v1/installation",tags=["system"]}]
 async fn installation(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<InstallationReport>, PrivateHeaders>, HttpError> {
-    administrator(&request)?;
+    administrator(&request).await?;
     Ok(private(request.context().installation.report().await))
 }
 #[endpoint {method=POST,path="/v1/installation/check",tags=["system"]}]
 async fn installation_check(
     request: RequestContext<Arc<Context>>,
 ) -> Result<HttpResponseHeaders<HttpResponseOk<InstallationReport>, PrivateHeaders>, HttpError> {
-    administrator(&request)?;
+    administrator(&request).await?;
     sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(request.context().store.pool())
         .await
@@ -648,7 +688,7 @@ async fn integration_presence(
     request: RequestContext<Arc<Context>>,
     body: TypedBody<PresenceReport>,
 ) -> Result<HttpResponseUpdatedNoContent, HttpError> {
-    let principal = authenticate(&request)?;
+    let principal = authenticate(&request).await?;
     if !matches!(principal.role, Role::Integration) || request.context().ingress_peer.is_some() {
         return Err(fail(
             Status::FORBIDDEN,
@@ -783,7 +823,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     Ok(api)
 }
 pub fn openapi() -> Result<serde_json::Value> {
-    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local one-off, standing and recurring maintenance tasks, source-preserving migrations, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.").json().map_err(Into::into)
+    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local one-off, standing and recurring maintenance tasks, owner-managed standing instructions, source-preserving migrations, completion history and durable reorder requests. Recurring tasks require a due date; instructions cannot be completed. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.").json().map_err(Into::into)
 }
 pub fn start(bind: SocketAddr, context: Arc<Context>) -> Result<HttpServer<Arc<Context>>> {
     start_with_logger(bind, context, crate::logging::logger())

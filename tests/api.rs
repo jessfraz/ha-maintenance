@@ -6,7 +6,7 @@ use home_maintenance::{
         ImportCatalog, Item, ItemId, Page, Schedule, SetChecklistStep, Summary, TimeZone,
         UpdateItem,
     },
-    store::Store,
+    store::{Management, Store},
 };
 use reqwest::{Client, Response, StatusCode};
 use std::{
@@ -336,7 +336,7 @@ async fn checklist_checks_are_replayable_and_only_parent_completion_advances_the
     );
     let archived = f
         .store
-        .archive(&current.id, current.revision, true)
+        .archive(&current.id, current.revision, true, Management::Owner)
         .await
         .unwrap();
     assert_eq!(
@@ -687,9 +687,12 @@ async fn import_validates_and_rolls_back_the_whole_catalog() {
     invalid.definition.name = String::new();
     assert!(
         f.store
-            .import(ImportCatalog {
-                items: vec![input("example-two"), invalid]
-            })
+            .import(
+                ImportCatalog {
+                    items: vec![input("example-two"), invalid]
+                },
+                Management::Owner,
+            )
             .await
             .is_err()
     );
@@ -704,7 +707,7 @@ async fn typed_patch_clears_optionals_and_rejects_invalid_changes_without_writes
         serde_json::from_str(r#"{"location":"Example room","group":null}"#).unwrap();
     let updated = f
         .store
-        .update(&item.id, item.revision, patch)
+        .update(&item.id, item.revision, patch, Management::Owner)
         .await
         .unwrap();
     assert_eq!(updated.definition.location.as_deref(), Some("Example room"));
@@ -713,7 +716,7 @@ async fn typed_patch_clears_optionals_and_rejects_invalid_changes_without_writes
     let patch: UpdateItem = serde_json::from_str(r#"{"location":null,"name":""}"#).unwrap();
     assert!(
         f.store
-            .update(&item.id, updated.revision, patch)
+            .update(&item.id, updated.revision, patch, Management::Owner)
             .await
             .is_err()
     );
@@ -818,7 +821,7 @@ async fn event_cursor_cannot_cross_items_and_history_survives_archive() {
     );
     let archived = f
         .store
-        .archive(&item.id, item.revision, true)
+        .archive(&item.id, item.revision, true, Management::Owner)
         .await
         .unwrap();
     assert!(archived.archived);
@@ -846,7 +849,7 @@ async fn event_cursor_cannot_cross_items_and_history_survives_archive() {
     );
     let restored = f
         .store
-        .archive(&item.id, archived.revision, false)
+        .archive(&item.id, archived.revision, false, Management::Owner)
         .await
         .unwrap();
     assert_eq!(restored.occurrence.id, item.occurrence.id);
@@ -1111,7 +1114,7 @@ async fn summary_counts_archived_and_completed_separately() {
     let item = f.create("example-filter").await;
     let completed: Item = complete(&f, &item, "summary").await.json().await.unwrap();
     f.store
-        .archive(&item.id, completed.revision, true)
+        .archive(&item.id, completed.revision, true, Management::Owner)
         .await
         .unwrap();
     let summary: Summary = f
@@ -1147,6 +1150,7 @@ async fn reorderable(f: &Fixture, id: &str) -> Item {
                 }])),
                 ..Default::default()
             },
+            Management::Owner,
         )
         .await
         .unwrap()
@@ -1213,6 +1217,7 @@ async fn reorder_receipts_survive_source_edits_archive_deletion_and_resolution()
                 reorder_url: Change(Some(None)),
                 ..Default::default()
             },
+            Management::Owner,
         )
         .await
         .unwrap();
@@ -1223,7 +1228,7 @@ async fn reorder_receipts_survive_source_edits_archive_deletion_and_resolution()
         .unwrap();
     assert_eq!(replay, receipt);
     f.store
-        .archive(&item.id, changed.revision, true)
+        .archive(&item.id, changed.revision, true, Management::Owner)
         .await
         .unwrap();
     let replay: ReorderReceipt = reorder(&f, &item, "physical-press")
@@ -1444,6 +1449,7 @@ async fn reorder_rejections_do_not_create_a_request_or_poison_a_key() {
                 reorder_url: Change(Some(Some("https://example.invalid/part".into()))),
                 ..Default::default()
             },
+            Management::Owner,
         )
         .await
         .unwrap();
@@ -1459,7 +1465,7 @@ async fn reorder_rejections_do_not_create_a_request_or_poison_a_key() {
     );
     let archived = f
         .store
-        .archive(&item.id, item.revision, true)
+        .archive(&item.id, item.revision, true, Management::Owner)
         .await
         .unwrap();
     assert_eq!(
@@ -1751,7 +1757,10 @@ async fn reorder_lost_response_survives_a_real_backend_process_crash_and_restart
         id: home_maintenance::models::SystemActor::Owner,
         name: "Owner credential".into(),
     };
-    let item = store.create(create, &actor, "seed-process").await.unwrap();
+    let item = store
+        .create(create, &actor, "seed-process", Management::Owner)
+        .await
+        .unwrap();
     store.close().await.unwrap();
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
@@ -1847,7 +1856,7 @@ async fn migration_request(
         .unwrap()
 }
 #[tokio::test]
-async fn unknown_due_once_standing_and_recurring_have_distinct_completion_lifecycles() {
+async fn task_completion_lifecycles_preserve_once_standing_and_recurring_semantics() {
     use home_maintenance::models::ItemStatus;
     let f = Fixture::new().await;
     for (id, schedule) in [
@@ -1856,7 +1865,11 @@ async fn unknown_due_once_standing_and_recurring_have_distinct_completion_lifecy
         ("example-recurring", Schedule::new(10, 0, 0).unwrap()),
     ] {
         let mut definition = input(id);
-        definition.due = None;
+        definition.due = if matches!(schedule, Schedule::Recurring { .. }) {
+            Some(chrono::Utc::now().date_naive())
+        } else {
+            None
+        };
         definition.definition.schedule = schedule;
         let response = f
             .client
@@ -1874,7 +1887,7 @@ async fn unknown_due_once_standing_and_recurring_have_distinct_completion_lifecy
             response.text().await.unwrap()
         );
         let item: Item = response.json().await.unwrap();
-        assert_eq!(item.occurrence.due, None);
+        assert_eq!(item.occurrence.due, definition.due);
         assert_eq!(item.status, ItemStatus::NeedsAction);
         let response = complete(&f, &item, &format!("complete-{id}")).await;
         assert_eq!(
@@ -1887,8 +1900,9 @@ async fn unknown_due_once_standing_and_recurring_have_distinct_completion_lifecy
         let event = completed.last_completion.as_ref().unwrap();
         assert!(event.completed_at.is_some());
         assert!(event.actor.is_some());
-        assert_eq!(event.previous_due, None);
+        assert_eq!(event.previous_due, definition.due);
         match schedule {
+            Schedule::Instruction => unreachable!("instructions are tested separately"),
             Schedule::Once => {
                 assert_eq!(completed.status, ItemStatus::Completed);
                 assert_eq!(completed.occurrence.id, item.occurrence.id);
@@ -1966,6 +1980,7 @@ async fn dated_then_unknown_pagination_and_due_clearing_are_null_safe() {
     ] {
         let mut item = input(id);
         item.due = due.map(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap());
+        item.definition.schedule = Schedule::Once;
         f.store
             .create(
                 item,
@@ -1974,6 +1989,7 @@ async fn dated_then_unknown_pagination_and_due_clearing_are_null_safe() {
                     name: "Owner credential".into(),
                 },
                 id,
+                Management::Owner,
             )
             .await
             .unwrap();
@@ -2168,6 +2184,7 @@ async fn migration_preview_apply_history_and_replays_preserve_known_and_unknown_
                 name: Change(Some("Edited current item".into())),
                 ..Default::default()
             },
+            Management::Owner,
         )
         .await
         .unwrap();
@@ -2259,7 +2276,12 @@ async fn migration_preview_apply_history_and_replays_preserve_known_and_unknown_
     };
     assert_eq!(
         reopened
-            .migrate(input.clone(), &owner, "migration-attempt")
+            .migrate(
+                input.clone(),
+                &owner,
+                "migration-attempt",
+                Management::Owner
+            )
             .await
             .unwrap(),
         receipt
@@ -2451,5 +2473,614 @@ async fn simultaneous_migrations_cannot_overwrite_one_target_or_duplicate_histor
         1
     );
     assert_eq!(f.store.list(false, None, 100).await.unwrap().items.len(), 1);
+    f.finish().await;
+}
+
+fn instruction_input(id: &str) -> CreateItem {
+    let mut item = input(id);
+    item.definition.schedule = Schedule::Instruction;
+    item.definition.checklist.clear();
+    item.due = None;
+    item
+}
+
+#[tokio::test]
+async fn recurring_due_is_required_at_every_definition_write_boundary() {
+    use home_maintenance::models::{Migration, MigrationAction, MigrationReport};
+    let f = Fixture::new().await;
+    let mut recurring = input("example-no-first-date");
+    recurring.due = None;
+    for body in [
+        serde_json::to_string(&recurring).unwrap(),
+        r#"{"id":"example-omitted-date","name":"Example","summary":"Inspect example","timezone":"Pacific/Kiritimati","schedule":{"kind":"recurring","interval":{"days":1,"months":0,"years":0}}}"#.into(),
+    ] {
+        let response = f.client.post(format!("{}/v1/items", f.origin)).bearer_auth(OWNER)
+            .header("Idempotency-Key", "reject-no-date").header("Content-Type", "application/json")
+            .body(body).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let response = f
+        .client
+        .post(format!("{}/v1/imports", f.origin))
+        .bearer_auth(OWNER)
+        .json(&ImportCatalog {
+            items: vec![input("example-valid-in-batch"), recurring.clone()],
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        f.store
+            .list(false, None, 100)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency")
+        .fetch_one(f.store.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let mut source = migration_item("example-no-first-date");
+    source.item = recurring;
+    let migration = Migration {
+        items: vec![source],
+    };
+    let report: MigrationReport = migration_request(&f, &migration, true, "preview")
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!report.applicable);
+    assert_eq!(report.items[0].action, MigrationAction::Conflict);
+    assert!(
+        report.items[0]
+            .conflicts
+            .iter()
+            .any(|conflict| conflict == "recurring tasks require a due date")
+    );
+    assert_eq!(
+        migration_request(&f, &migration, false, "reject-migration")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert!(
+        f.store
+            .list(false, None, 100)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+
+    let current = f.create("example-dated-task").await;
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, current.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", current.revision))
+        .json(&UpdateItem {
+            due: Change(Some(None)),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(f.get(current.id.as_ref()).await.revision, current.revision);
+
+    let mut undated = input("example-undated-once");
+    undated.definition.schedule = Schedule::Once;
+    undated.due = None;
+    let undated: Item = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "undated-once")
+        .json(&undated)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let schedule = Schedule::new(0, 1, 0).unwrap();
+    let conversion = UpdateItem {
+        schedule: Change(Some(schedule)),
+        ..Default::default()
+    };
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, undated.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", undated.revision))
+        .json(&conversion)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        f.get(undated.id.as_ref()).await.definition.schedule,
+        Schedule::Once
+    );
+    let zone = TimeZone::try_from("Pacific/Kiritimati".to_owned()).unwrap();
+    let today = chrono::Utc::now().with_timezone(&zone.0).date_naive();
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, undated.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", undated.revision))
+        .json(&UpdateItem {
+            schedule: Change(Some(schedule)),
+            timezone: Change(Some(zone)),
+            due: Change(Some(Some(today))),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let updated: Item = response.json().await.unwrap();
+    assert_eq!(updated.occurrence.due, Some(today));
+    assert_eq!(updated.definition.timezone.0, zone.0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn instructions_are_reference_records_that_only_the_owner_can_manage() {
+    use home_maintenance::models::{Migration, ReorderItem, SourceRef};
+    let f = Fixture::new().await;
+    let definition = instruction_input("example-instruction");
+    let item: Item = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "owner-instruction")
+        .json(&definition)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(f.store.summary().await.unwrap().active, 0);
+    assert_eq!(f.store.list(false, None, 100).await.unwrap().items.len(), 1);
+    for response in [
+        complete(&f, &item, "never-complete").await,
+        set_step(&f, &item, Uuid::from_u128(1), true, "never-check").await,
+        f.client
+            .post(format!(
+                "{}/v1/items/{}/reorders",
+                f.origin,
+                item.id.as_ref()
+            ))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", "never-reorder")
+            .header("If-Match", format!("\"{}\"", item.revision))
+            .json(&ReorderItem::default())
+            .send()
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    assert!(
+        f.store
+            .events(&item.id, None, 100)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(f.get(item.id.as_ref()).await.revision, item.revision);
+
+    // A normal HA administrator can manage tasks, but has no instruction authority.
+    let admin = || {
+        f.client
+            .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-Actor-Id", "ha:example-admin")
+            .header("X-Maintenance-Admin", "true")
+            .header("If-Match", format!("\"{}\"", item.revision))
+    };
+    for patch in [
+        UpdateItem {
+            summary: Change(Some("Changed wording".into())),
+            ..Default::default()
+        },
+        UpdateItem {
+            schedule: Change(Some(Schedule::Once)),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(
+            admin().json(&patch).send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    for method in [reqwest::Method::PUT, reqwest::Method::DELETE] {
+        let response = f
+            .client
+            .request(
+                method,
+                format!("{}/v1/items/{}/archive", f.origin, item.id.as_ref()),
+            )
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-Actor-Id", "ha:example-admin")
+            .header("X-Maintenance-Admin", "true")
+            .header("If-Match", format!("\"{}\"", item.revision))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let mut new_instruction = definition.clone();
+    new_instruction.id = "example-instruction-two".to_owned().try_into().unwrap();
+    let mut migrated = migration_item("example-instruction-two");
+    migrated.item = new_instruction.clone();
+    migrated.source = SourceRef {
+        system: "example".into(),
+        collection: "instructions".into(),
+        id: "two".into(),
+    };
+    for (route, body) in [
+        ("items", serde_json::to_string(&new_instruction).unwrap()),
+        (
+            "imports",
+            serde_json::to_string(&ImportCatalog {
+                items: vec![new_instruction],
+            })
+            .unwrap(),
+        ),
+        (
+            "migrations",
+            serde_json::to_string(&Migration {
+                items: vec![migrated],
+            })
+            .unwrap(),
+        ),
+    ] {
+        let response = f
+            .client
+            .post(format!("{}/v1/{route}", f.origin))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-Actor-Id", "ha:example-admin")
+            .header("X-Maintenance-Admin", "true")
+            .header("Idempotency-Key", "no-instruction-management")
+            .header("Content-Type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let task = f.create("example-conversion-task").await;
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, task.id.as_ref()))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-Actor-Id", "ha:example-admin")
+        .header("X-Maintenance-Admin", "true")
+        .header("If-Match", format!("\"{}\"", task.revision))
+        .json(&UpdateItem {
+            schedule: Change(Some(Schedule::Instruction)),
+            due: Change(Some(None)),
+            checklist: Change(Some(vec![])),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // A verified HA owner may edit, remove reversibly, and restore the instruction.
+    let edited: Item = admin()
+        .header("X-Maintenance-Owner", "true")
+        .json(&UpdateItem {
+            description: Change(Some(Some("Keep this instruction visible.".into()))),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let archived: Item = f
+        .client
+        .put(format!(
+            "{}/v1/items/{}/archive",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", edited.revision))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(archived.archived);
+    let restored: Item = f
+        .client
+        .delete(format!(
+            "{}/v1/items/{}/archive",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", archived.revision))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!restored.archived);
+    assert_eq!(restored.definition.schedule, Schedule::Instruction);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn owner_capability_requires_verified_identity_and_ingress_presence() {
+    let f = Fixture::new().await;
+    let context = Context::new(f.store.clone(), OWNER).with_integration(INTEGRATION);
+    let api = api::start(([127, 0, 0, 1], 0).into(), Arc::new(context.clone())).unwrap();
+    let ingress = api::start(
+        ([127, 0, 0, 1], 0).into(),
+        Arc::new(context.for_ingress(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+    )
+    .unwrap();
+    let api_origin = format!("http://{}", api.local_addr());
+    let ingress_origin = format!("http://{}", ingress.local_addr());
+    for (actor, admin, owner) in [
+        (None, true, true),
+        (Some("ha:example-owner"), false, true),
+        (Some("ha:example-admin"), true, false),
+    ] {
+        let mut request = f
+            .client
+            .get(format!("{api_origin}/v1/system"))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-Admin", admin.to_string())
+            .header("X-Maintenance-Owner", owner.to_string());
+        if let Some(actor) = actor {
+            request = request.header("X-Maintenance-Actor-Id", actor);
+        }
+        let system: System = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!system.can_manage_instructions);
+    }
+    let instruction = instruction_input("example-ingress-instruction");
+    let ingress_write = |identity: &str| {
+        f.client
+            .post(format!("{ingress_origin}/v1/items"))
+            .header("X-Remote-User-Id", identity)
+            .header("X-Maintenance-Owner", "true")
+            .header("X-Maintenance-Request", "1")
+            .header("Idempotency-Key", "ingress-instruction")
+            .json(&instruction)
+    };
+    assert_eq!(
+        ingress_write("example-owner")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let report = home_maintenance::installation::PresenceReport {
+        version: env!("CARGO_PKG_VERSION").into(),
+        backup: Default::default(),
+        owner_id: Some("example-owner".into()),
+    };
+    let response = f
+        .client
+        .post(format!("{api_origin}/v1/integration/presence"))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .json(&report)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        ingress_write("example-admin")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = ingress_write("example-owner").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let system: System = f
+        .client
+        .get(format!("{ingress_origin}/v1/system"))
+        .header("X-Remote-User-Id", "example-owner")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(system.can_manage_instructions);
+    let response = f
+        .client
+        .post(format!("{api_origin}/v1/integration/presence"))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .json(&home_maintenance::installation::PresenceReport {
+            owner_id: None,
+            ..report
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let system: System = f
+        .client
+        .get(format!("{ingress_origin}/v1/system"))
+        .header("X-Remote-User-Id", "example-owner")
+        .header("X-Maintenance-Owner", "true")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!system.can_manage_instructions);
+    ingress.close().await.unwrap();
+    api.close().await.unwrap();
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn instruction_constraints_and_transactional_management_prevent_bypasses() {
+    use home_maintenance::models::{ItemStatus, Migration, MigrationReport};
+    let f = Fixture::new().await;
+    let valid = instruction_input("example-guarded-instruction");
+    let mut dated = valid.clone();
+    dated.due = Some(chrono::Utc::now().date_naive());
+    let mut checked = valid.clone();
+    checked.definition.checklist = input("unused").definition.checklist;
+    let mut reordered = valid.clone();
+    reordered.definition.reorder_url = Some("https://example.com/part".into());
+    for invalid in [dated, checked, reordered] {
+        let response = f
+            .client
+            .post(format!("{}/v1/items", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", "reject-instruction-state")
+            .json(&invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let mut migrated = migration_item(valid.id.as_ref());
+    migrated.item = valid.clone();
+    migrated.status = ItemStatus::Completed;
+    let migration = Migration {
+        items: vec![migrated],
+    };
+    let report: MigrationReport = migration_request(&f, &migration, true, "closed-preview")
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!report.applicable);
+    assert_eq!(
+        migration_request(&f, &migration, false, "closed-apply")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let item: Item = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "guarded-instruction")
+        .json(&valid)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let owner = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .json(&UpdateItem {
+            schedule: Change(Some(Schedule::Once)),
+            ..Default::default()
+        });
+    let admin = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-Actor-Id", "ha:example-admin")
+        .header("X-Maintenance-Admin", "true")
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .json(&UpdateItem {
+            summary: Change(Some("Unauthorized edit".into())),
+            ..Default::default()
+        });
+    let (owner, admin) = tokio::join!(owner.send(), admin.send());
+    assert_eq!(owner.unwrap().status(), StatusCode::OK);
+    assert!(
+        [StatusCode::FORBIDDEN, StatusCode::PRECONDITION_FAILED].contains(&admin.unwrap().status())
+    );
+    assert_eq!(
+        f.get(item.id.as_ref()).await.definition.summary,
+        valid.definition.summary
+    );
+    let current = f.get(item.id.as_ref()).await;
+    let owner = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", current.revision))
+        .json(&UpdateItem {
+            schedule: Change(Some(Schedule::Instruction)),
+            ..Default::default()
+        });
+    let admin = f
+        .client
+        .put(format!(
+            "{}/v1/items/{}/archive",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-Actor-Id", "ha:example-admin")
+        .header("X-Maintenance-Admin", "true")
+        .header("If-Match", format!("\"{}\"", current.revision));
+    let (owner, admin) = tokio::join!(owner.send(), admin.send());
+    let owner = owner.unwrap().status();
+    let admin = admin.unwrap().status();
+    match (owner, admin) {
+        (StatusCode::OK, StatusCode::FORBIDDEN) => {
+            let current = f.get(item.id.as_ref()).await;
+            assert!(!current.archived);
+            assert_eq!(current.definition.schedule, Schedule::Instruction);
+        }
+        (StatusCode::PRECONDITION_FAILED, StatusCode::OK) => {
+            let current = f.get(item.id.as_ref()).await;
+            assert!(current.archived);
+            assert_eq!(current.definition.schedule, Schedule::Once);
+        }
+        other => panic!("unexpected concurrent results: {other:?}"),
+    }
     f.finish().await;
 }

@@ -55,6 +55,9 @@ def item_record(
     location: str | None = None,
     due: str | None = "2026-10-15",
     status: Literal["needs_action", "completed"] = "needs_action",
+    schedule_kind: Literal["once", "standing", "recurring", "instruction"] = (
+        "recurring"
+    ),
     archived: bool = False,
     checklist: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -70,10 +73,14 @@ def item_record(
         "timezone": "UTC",
         "location": location,
         "group": None,
-        "schedule": {
-            "kind": "recurring",
-            "interval": {"days": 0, "months": 3, "years": 0},
-        },
+        "schedule": (
+            {
+                "kind": "recurring",
+                "interval": {"days": 0, "months": 3, "years": 0},
+            }
+            if schedule_kind == "recurring"
+            else {"kind": schedule_kind}
+        ),
         "instructions": ["Turn off the appliance", "Replace the filter"],
         "specs": [],
         "resources": [],

@@ -7,6 +7,8 @@ const isIngress = base.pathname.includes("/api/hassio_ingress/");
 let token = "";
 let connected = false;
 let isOwner = false;
+let canManageInstructions = false;
+let defaultedDue = false;
 let items = [];
 let selected = null;
 let editing = null;
@@ -148,6 +150,8 @@ function itemPending(item) {
 }
 
 function dueInfo(item) {
+  if (item.schedule.kind === "instruction")
+    return { label: "Standing instruction", className: "undated", days: null };
   const due = item.occurrence.due;
   if (item.status === "completed")
     return { label: "Completed", className: "", days: null };
@@ -170,7 +174,8 @@ function dueInfo(item) {
 
 function cadence(schedule) {
   if (schedule.kind === "once") return "One-off";
-  if (schedule.kind === "standing") return "Standing";
+  if (schedule.kind === "standing") return "Standing task";
+  if (schedule.kind === "instruction") return "Standing instruction";
   return (
     "Every " +
     ["years", "months", "days"]
@@ -268,6 +273,7 @@ function renderList() {
       const days = dueInfo(item).days;
       return (
         matches &&
+        (view === "archived" || item.schedule.kind !== "instruction") &&
         (view === "archived" ||
           (view === "completed"
             ? item.status === "completed"
@@ -312,55 +318,71 @@ function renderList() {
     root.append(empty);
   }
   for (const item of visible) {
-    const card = element(
-      "article",
-      undefined,
-      `item-card${item.archived ? " archived" : ""}`,
-    );
-    const content = element("div");
-    const place = itemPlace(item);
-    if (place) content.append(element("p", place, "item-place"));
-    const link = element("a", item.summary);
-    link.href = new URL(itemPath(item.id), base).href;
-    link.addEventListener("click", (event) => {
-      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
-        return;
-      event.preventDefault();
-      openDetail(item.id).catch((error) => notice(errorMessage(error), true));
-    });
-    content.append(
-      link,
-      element("div", item.name, "item-name"),
-      element(
-        "div",
-        [
-          cadence(item.schedule),
-          item.occurrence.checklist.length
-            ? checklistProgress(item.occurrence.checklist)
-            : null,
-        ]
-          .filter(Boolean)
-          .join(" · "),
-        "item-meta",
-      ),
-    );
-    const due = element("div", undefined, "item-due");
-    const info = dueInfo(item);
-    due.append(
-      element(
-        "span",
-        item.archived ? "Archived" : info.label,
-        `badge ${item.archived ? "archived" : info.className}`,
-      ),
-    );
-    if (item.occurrence.due) {
-      const time = element("time", dateLabel(item.occurrence.due));
-      time.dateTime = item.occurrence.due;
-      due.append(time);
-    }
-    card.append(content, due);
-    root.append(card);
+    root.append(itemCard(item));
   }
+  const instructions = items
+    .filter((item) =>
+      !item.archived && item.schedule.kind === "instruction" &&
+      [item.name, item.summary, item.description, item.location, item.group]
+        .filter(Boolean)
+        .some((value) => value.toLocaleLowerCase().includes(query)),
+    )
+    .sort((left, right) => left.summary.localeCompare(right.summary));
+  byId("standing-instructions").hidden = !instructions.length;
+  byId("instruction-list").replaceChildren(...instructions.map(itemCard));
+}
+
+function itemCard(item) {
+  const instruction = item.schedule.kind === "instruction";
+  const card = element(
+    "article",
+    undefined,
+    `item-card${item.archived ? " archived" : ""}${instruction ? " instruction-card" : ""}`,
+  );
+  const content = element("div");
+  const place = itemPlace(item);
+  if (place) content.append(element("p", place, "item-place"));
+  const link = element("a", item.summary);
+  link.href = new URL(itemPath(item.id), base).href;
+  link.addEventListener("click", (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+      return;
+    event.preventDefault();
+    openDetail(item.id).catch((error) => notice(errorMessage(error), true));
+  });
+  content.append(link, element("div", item.name, "item-name"));
+  if (!instruction) content.append(
+    element(
+      "div",
+      [
+        cadence(item.schedule),
+        item.occurrence.checklist.length
+          ? checklistProgress(item.occurrence.checklist)
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      "item-meta",
+    ),
+  );
+  if (instruction && item.description)
+    content.append(element("p", item.description, "task-description"));
+  const due = element("div", undefined, "item-due");
+  const info = dueInfo(item);
+  due.append(
+    element(
+      "span",
+      item.archived ? "Archived" : info.label,
+      `badge ${item.archived ? "archived" : info.className}`,
+    ),
+  );
+  if (item.occurrence.due) {
+    const time = element("time", dateLabel(item.occurrence.due));
+    time.dateTime = item.occurrence.due;
+    due.append(time);
+  }
+  card.append(content, due);
+  return card;
 }
 
 async function load() {
@@ -392,15 +414,18 @@ async function load() {
       } while (cursor);
       return result;
     };
-    const [loaded, summary] = await Promise.all([
+    const [loaded, summary, system] = await Promise.all([
       loadItems(),
       api("v1/summary"),
+      api("v1/system"),
     ]);
     if (generation !== listGeneration || !loaded) return;
     items = loaded;
     loadedArchive = archived;
+    renderSystem(system);
     renderSummary(summary);
     renderList();
+    if (selected) renderDetail();
   } catch (error) {
     if (generation === listGeneration) {
       byId("list-status").textContent =
@@ -544,6 +569,8 @@ function checklistHistory(steps) {
 function renderDetail() {
   const item = selected;
   if (!item) return;
+  const instruction = item.schedule.kind === "instruction";
+  byId("history-title").closest("section").hidden = instruction;
   byId("detail-title").textContent = item.summary;
   byId("detail-location").textContent = itemPlace(item);
   const root = byId("detail-content");
@@ -551,21 +578,29 @@ function renderDetail() {
   root.append(element("p", item.name, "detail-item-name"));
   if (item.description)
     root.append(element("p", item.description, "task-description"));
-  const timing = element("div", undefined, "timing");
-  const due = element("div");
-  due.append(
-    element("span", item.archived ? "ARCHIVED" : "NEXT DUE"),
-    element("strong", item.archived ? "Schedule paused" : dueInfo(item).label),
-    element("p", item.occurrence.due
-      ? `${dateLabel(item.occurrence.due)} · ${item.timezone}` : item.timezone),
-  );
-  const interval = element("div");
-  interval.append(
-    element("span", "SCHEDULE"),
-    element("strong", cadence(item.schedule)),
-  );
-  timing.append(due, interval);
-  root.append(timing);
+  if (instruction) {
+    root.append(element(
+      "p",
+      "Standing instruction · Only the owner can edit or remove it.",
+      "muted",
+    ));
+  } else {
+    const timing = element("div", undefined, "timing");
+    const due = element("div");
+    due.append(
+      element("span", item.archived ? "ARCHIVED" : "NEXT DUE"),
+      element("strong", item.archived ? "Schedule paused" : dueInfo(item).label),
+      element("p", item.occurrence.due
+        ? `${dateLabel(item.occurrence.due)} · ${item.timezone}` : item.timezone),
+    );
+    const interval = element("div");
+    interval.append(
+      element("span", "SCHEDULE"),
+      element("strong", cadence(item.schedule)),
+    );
+    timing.append(due, interval);
+    root.append(timing);
+  }
   const checklist = renderChecklist(item);
   if (checklist) root.append(checklist);
   if (item.instructions.length) {
@@ -604,6 +639,7 @@ function renderDetail() {
   const actions = byId("actions");
   actions.replaceChildren();
   if (
+    !instruction &&
     !item.archived &&
     (item.status === "needs_action" || completionRequests.has(item.id))
   ) {
@@ -634,12 +670,12 @@ function renderDetail() {
     }
   }
   actions.append(action("Copy NFC link", () => copyItemLink(item)));
-  if (isOwner) {
+  if (isOwner && (!instruction || canManageInstructions)) {
     const edit = action("Edit", () => openEditor(item));
     edit.disabled = itemBusy(item) || itemPending(item);
     actions.append(edit);
     const archive = action(
-      item.archived ? "Restore item" : "Archive",
+      item.archived ? "Restore item" : instruction ? "Remove instruction" : "Archive",
       () => archiveItem(item),
       "quiet archive-action",
     );
@@ -684,7 +720,7 @@ async function openDetail(id, updateRoute = true) {
   renderDetail();
   if (!byId("detail").open) byId("detail").showModal();
   if (updateRoute) navigate(id);
-  await loadEvents(generation);
+  if (item.schedule.kind !== "instruction") await loadEvents(generation);
 }
 
 function closeDetail(updateRoute = true) {
@@ -920,6 +956,10 @@ async function updateChecklist(item, stepId, completed) {
 }
 
 async function archiveItem(item) {
+  if (
+    item.schedule.kind === "instruction" && !item.archived &&
+    !window.confirm("Remove this standing instruction? You can restore it from Archived.")
+  ) return;
   let updated;
   try {
     updated = await api(`v1/items/${encodeURIComponent(item.id)}/archive`, {
@@ -941,15 +981,16 @@ async function archiveItem(item) {
       updated || (await api(`v1/items/${encodeURIComponent(item.id)}`));
     renderDetail();
   }
-  notice(
-    item.archived
+  const message = item.schedule.kind === "instruction"
+    ? item.archived
+      ? "Standing instruction restored."
+      : "Standing instruction removed. You can restore it from Archived."
+    : item.archived
       ? "Item restored to the maintenance queue."
-      : "Item archived. Its history and NFC link are preserved.",
-  );
+      : "Item archived. Its history and NFC link are preserved.";
+  notice(message);
   if (selected?.id === item.id)
-    byId("detail-status").textContent = item.archived
-      ? "Restored to the maintenance queue."
-      : "Archived. Completion history and the NFC link are preserved.";
+    byId("detail-status").textContent = message;
   await load().catch((error) =>
     notice(
       `The item was ${item.archived ? "restored" : "archived"}, but the queue could not be refreshed. ${errorMessage(error)}`,
@@ -1098,6 +1139,7 @@ function openEditor(item = null) {
     form.elements.namedItem(unit).value =
       item?.schedule.interval?.[unit] ?? 0;
   byId("schedule-kind").value = item?.schedule.kind ?? "once";
+  defaultedDue = false;
   updateScheduleEditor();
   byId("days").setCustomValidity("");
   for (const spec of item?.specs || [])
@@ -1151,14 +1193,16 @@ async function saveItem() {
     name: value("name"),
     summary: value("summary"),
     description: value("description") || null,
-    checklist: [...byId("checklist-rows").children].map((row) => ({
-      id: row.dataset.stepId,
-      summary: row.querySelector("input").value.trim(),
-    })),
+    checklist: value("schedule-kind") === "instruction"
+      ? []
+      : [...byId("checklist-rows").children].map((row) => ({
+          id: row.dataset.stepId,
+          summary: row.querySelector("input").value.trim(),
+        })),
     location: value("location") || null,
     group: value("group") || null,
     timezone: value("timezone"),
-    due: value("due") || null,
+    due: value("schedule-kind") === "instruction" ? null : value("due") || null,
     schedule: value("schedule-kind") === "recurring"
       ? { kind: "recurring", interval } : { kind: value("schedule-kind") },
     instructions: value("instructions")
@@ -1167,7 +1211,8 @@ async function saveItem() {
       .filter(Boolean),
     specs: metadataValues("spec"),
     resources: metadataValues("resource"),
-    reorder_url: value("reorder_url") || null,
+    reorder_url: value("schedule-kind") === "instruction"
+      ? null : value("reorder_url") || null,
   };
   if (body.reorder_url && !safeLink(body.reorder_url, "Reorder")) {
     byId("edit-error").textContent =
@@ -1268,20 +1313,26 @@ async function loadInstallation(check = false) {
   }
 }
 
-async function connect() {
-  const system = await api("v1/system");
-  connected = true;
+function renderSystem(system) {
   isOwner = system.credential_role === "owner";
-  byId("login").hidden = true;
-  byId("dashboard").hidden = false;
+  canManageInstructions = system.can_manage_instructions === true;
+  byId("schedule-kind").querySelector('[value="instruction"]').disabled =
+    !canManageInstructions;
   byId("add").hidden = !isOwner;
   byId("installation").hidden = !isOwner;
-  byId("token").value = "";
   byId("app-version").textContent = system.version;
   byId("service-status").textContent = system.integration_connected
     ? "Home Assistant connected"
     : "Home Assistant not paired";
   byId("app-footer").hidden = false;
+}
+
+async function connect() {
+  renderSystem(await api("v1/system"));
+  connected = true;
+  byId("login").hidden = true;
+  byId("dashboard").hidden = false;
+  byId("token").value = "";
   notice("");
   await load();
   if (isOwner) await loadInstallation();
@@ -1305,19 +1356,50 @@ byId("login").addEventListener(
   }),
 );
 function updateScheduleEditor() {
-  const recurring = byId("schedule-kind").value === "recurring";
+  const kind = byId("schedule-kind").value;
+  const recurring = kind === "recurring";
+  const instruction = kind === "instruction";
+  const due = byId("due");
+  due.required = recurring;
+  due.disabled = instruction;
+  due.closest("label").hidden = instruction;
+  byId("due-label").textContent = recurring
+    ? editing?.schedule.kind === "recurring" && editing.occurrence.due
+      ? "Next due date" : "First due date"
+    : "Due date (optional)";
+  if (recurring && (!due.value || defaultedDue)) {
+    try {
+      due.value = today(byId("timezone").value.trim());
+      defaultedDue = true;
+    } catch {
+      due.value = "";
+    }
+  }
+  byId("checklist-editor-title").closest("section").hidden = instruction;
+  byId("reorder-url").disabled = instruction;
+  byId("reorder-url").closest("label").hidden = instruction;
+  for (const field of byId("checklist-rows").querySelectorAll("input"))
+    field.disabled = instruction;
   byId("interval-fields").hidden = !recurring;
   byId("schedule-help").textContent = {
     once: "Completion closes the task.",
     standing: "Completion starts another undated occurrence.",
-    recurring: "Repeat after completion using the interval below.",
-  }[byId("schedule-kind").value];
+    recurring: "Starts on the first due date, then repeats after completion.",
+    instruction: "Always visible. No completion or due date. Only the owner can edit or remove it.",
+  }[kind];
   for (const unit of ["years", "months", "days"])
     byId(unit).disabled = !recurring;
   byId("days").setCustomValidity("");
 }
 
 byId("schedule-kind").addEventListener("change", updateScheduleEditor);
+byId("due").addEventListener("input", () => { defaultedDue = false; });
+byId("timezone").addEventListener("change", () => {
+  if (defaultedDue && byId("schedule-kind").value === "recurring") {
+    byId("due").value = "";
+    updateScheduleEditor();
+  }
+});
 byId("add").addEventListener("click", () => openEditor());
 byId("refresh").addEventListener(
   "click",

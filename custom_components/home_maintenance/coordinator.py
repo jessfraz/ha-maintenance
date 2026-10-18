@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import timedelta
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -37,6 +37,7 @@ class PresenceReport(TypedDict):
 
     version: str
     backup: BackupReport
+    owner_id: NotRequired[str]
 
 
 class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
@@ -128,6 +129,11 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
         if self._entry.state is not ConfigEntryState.LOADED:
             return
         report: PresenceReport = {"version": self._version, "backup": backup}
+        owner = await self.hass.auth.async_get_owner()
+        if self._entry.state is not ConfigEntryState.LOADED:
+            return
+        if owner is not None and owner.is_active and owner.is_admin:
+            report["owner_id"] = owner.id
         try:
             response = await self.client.request(
                 "POST",

@@ -26,6 +26,7 @@ class Actor:
     name: str = "Home Assistant automation"
     admin: bool = False
     system_actor: Literal["ha:automation", "ha:integration"] = "ha:automation"
+    owner: bool = False
 
     def headers(self) -> dict[str, str]:
         """Carry either an authenticated user or explicit system attribution."""
@@ -37,6 +38,8 @@ class Actor:
         }
         if self.admin:
             result["X-Maintenance-Admin"] = "true"
+            if self.owner:
+                result["X-Maintenance-Owner"] = "true"
         return result
 
 

@@ -19,7 +19,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import MaintenanceCoordinator
-from .models import ItemStatus
+from .models import ItemStatus, ScheduleKind
 from .services import async_actor, async_complete
 
 
@@ -28,8 +28,13 @@ async def async_setup_entry(
     entry: ConfigEntry[MaintenanceCoordinator],
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Expose a single list while the Rust service owns recurrence and history."""
-    async_add_entities([MaintenanceTodo(entry.runtime_data, entry.entry_id)])
+    """Separate actionable tasks from persistent, read-only instructions."""
+    async_add_entities(
+        [
+            MaintenanceTodo(entry.runtime_data, entry.entry_id),
+            MaintenanceInstructions(entry.runtime_data, entry.entry_id),
+        ]
+    )
 
 
 class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity):
@@ -103,7 +108,7 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
                 description=item.task_description,
             )
             for item in self.coordinator.data.items
-            if not item.archived
+            if not item.archived and item.schedule_kind is not ScheduleKind.INSTRUCTION
         ]
 
     async def async_update_todo_item(self, item: TodoItem) -> None:
@@ -116,6 +121,7 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
                 current
                 for current in self.coordinator.data.items
                 if not current.archived
+                and current.schedule_kind is not ScheduleKind.INSTRUCTION
                 and current.status is ItemStatus.NEEDS_ACTION
                 and str(current.occurrence_id) == item.uid
             ),
@@ -144,4 +150,48 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             current.occurrence_id,
             actor,
             if_match=f'"{current.revision}"',
+        )
+
+
+class MaintenanceInstructions(MaintenanceTodo):
+    """Permanent reference entries with no completion or deletion controls."""
+
+    _attr_name = "Instructions"
+    _attr_supported_features = 0
+    _attr_icon = "mdi:book-open-outline"
+
+    def __init__(self, coordinator: MaintenanceCoordinator, entry_id: str) -> None:
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_instructions"
+
+    @override
+    def _update_todo_items(self) -> None:
+        """Omit status: these references are neither pending nor completed tasks."""
+        self._attr_todo_items = [
+            TodoItem(
+                uid=str(item.occurrence_id),
+                summary=item.summary,
+                description=item.task_description,
+            )
+            for item in self.coordinator.data.items
+            if not item.archived and item.schedule_kind is ScheduleKind.INSTRUCTION
+        ]
+
+    @override
+    async def async_update_todo_item(self, item: TodoItem) -> None:
+        """Assist may call entities directly instead of HA's feature-gated services."""
+        raise ServiceValidationError("Standing instructions cannot be completed")
+
+    @override
+    async def async_delete_todo_items(self, uids: list[str]) -> None:
+        """Keep direct Assist removal subject to the same read-only contract."""
+        raise ServiceValidationError(
+            "Only the owner can archive standing instructions in Maintenance"
+        )
+
+    @override
+    async def async_create_todo_item(self, item: TodoItem) -> None:
+        """Instruction definitions are managed through Maintenance's owner API."""
+        raise ServiceValidationError(
+            "Only the owner can add standing instructions in Maintenance"
         )

@@ -2,6 +2,8 @@
 pub enum Error {
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("only the owner can manage standing instructions")]
+    Forbidden,
     #[error("maintenance item not found")]
     NotFound,
     #[error("{0}")]
@@ -23,6 +25,7 @@ impl From<Error> for dropshot::HttpError {
         use dropshot::ClientErrorStatusCode as Status;
         let (status, code) = match error {
             Error::Invalid(_) => (Status::BAD_REQUEST, "invalid_input"),
+            Error::Forbidden => (Status::FORBIDDEN, "owner_required"),
             Error::NotFound => (Status::NOT_FOUND, "not_found"),
             Error::Conflict(_) => (Status::CONFLICT, "conflict"),
             Error::Precondition => (Status::PRECONDITION_FAILED, "revision_conflict"),

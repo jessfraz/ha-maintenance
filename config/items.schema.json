@@ -58,6 +58,18 @@
               "$ref": "#/$defs/interval"
             }
           }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "instruction"
+            }
+          }
         }
       ],
       "default": {
@@ -236,7 +248,71 @@
           },
           "maxItems": 100
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "schedule"
+            ],
+            "properties": {
+              "schedule": {
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "recurring"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "due"
+            ],
+            "properties": {
+              "due": {
+                "type": "string",
+                "format": "date"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "schedule"
+            ],
+            "properties": {
+              "schedule": {
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "instruction"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "due": {
+                "type": "null"
+              },
+              "checklist": {
+                "maxItems": 0
+              },
+              "reorder_url": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
     },
     "interval": {
       "type": "object",

@@ -16,6 +16,15 @@ class ItemStatus(StrEnum):
     COMPLETED = "completed"
 
 
+class ScheduleKind(StrEnum):
+    """Task lifecycles owned and enforced by the backend."""
+
+    ONCE = "once"
+    STANDING = "standing"
+    RECURRING = "recurring"
+    INSTRUCTION = "instruction"
+
+
 class ActorKind(StrEnum):
     """Backend-owned attribution kinds."""
 
@@ -109,6 +118,7 @@ class MaintenanceItem:
     revision: int
     archived: bool
     status: ItemStatus
+    schedule_kind: ScheduleKind
     completed_at: datetime | None
     occurrence_id: UUID
     due: date | None
@@ -153,6 +163,7 @@ class MaintenanceItem:
         revision = value.get("revision")
         archived = value.get("archived")
         status = value.get("status")
+        schedule = value.get("schedule")
         occurrence = value.get("occurrence")
         instructions = value.get("instructions")
         if (
@@ -168,6 +179,8 @@ class MaintenanceItem:
             or revision < 1
             or type(archived) is not bool
             or not isinstance(status, str)
+            or not isinstance(schedule, dict)
+            or not isinstance(schedule.get("kind"), str)
             or not isinstance(occurrence, dict)
             or not isinstance(instructions, list)
             or not all(isinstance(line, str) for line in instructions)
@@ -214,6 +227,7 @@ class MaintenanceItem:
             revision,
             archived,
             ItemStatus(status),
+            ScheduleKind(schedule["kind"]),
             completed_at,
             UUID(occurrence_id),
             due_date,

@@ -72,6 +72,8 @@ class MaintenanceView(HomeAssistantView):
         if len(request.query_string) > 4096 or request.query.keys() - allowed_query:
             raise web.HTTPBadRequest(reason="Unsupported query parameters")
         user = request["hass_user"]
+        if not user.is_active:
+            raise web.HTTPForbidden
         admin_only = request.method != "GET" and not (
             path.endswith("/completions")
             or _CHECKLIST_ROUTE.fullmatch(path)
@@ -109,7 +111,12 @@ class MaintenanceView(HomeAssistantView):
                     else ""
                 ),
                 body=bytes(payload) or None,
-                actor=Actor(user.id, user.name or "Home Assistant user", user.is_admin),
+                actor=Actor(
+                    user.id,
+                    user.name or "Home Assistant user",
+                    user.is_admin,
+                    owner=user.is_owner and user.is_admin,
+                ),
                 headers=headers,
             )
         except TimeoutError:

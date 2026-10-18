@@ -747,6 +747,11 @@
           "backup": {
             "$ref": "#/components/schemas/BackupReport"
           },
+          "owner_id": {
+            "default": null,
+            "nullable": true,
+            "type": "string"
+          },
           "version": {
             "type": "string"
           }
@@ -952,6 +957,21 @@
           {
             "additionalProperties": false,
             "properties": {
+              "kind": {
+                "enum": [
+                  "instruction"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "interval": {
                 "$ref": "#/components/schemas/Interval"
               },
@@ -993,6 +1013,21 @@
               "kind": {
                 "enum": [
                   "standing"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "instruction"
                 ],
                 "type": "string"
               }
@@ -1123,6 +1158,9 @@
       },
       "System": {
         "properties": {
+          "can_manage_instructions": {
+            "type": "boolean"
+          },
           "credential_role": {
             "$ref": "#/components/schemas/Role"
           },
@@ -1134,6 +1172,7 @@
           }
         },
         "required": [
+          "can_manage_instructions",
           "credential_role",
           "integration_connected",
           "version"
@@ -1220,9 +1259,9 @@
     }
   },
   "info": {
-    "description": "Local one-off, standing and recurring maintenance tasks, source-preserving migrations, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.",
+    "description": "Local one-off, standing and recurring maintenance tasks, owner-managed standing instructions, source-preserving migrations, completion history and durable reorder requests. Recurring tasks require a due date; instructions cannot be completed. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.",
     "title": "Maintenance API",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "openapi": "3.0.3",
   "paths": {
