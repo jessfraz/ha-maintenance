@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod error;
+pub mod home_assistant;
 pub mod installation;
 pub mod logging;
 pub mod models;

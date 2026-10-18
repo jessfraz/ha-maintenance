@@ -644,6 +644,33 @@ cmp --silent "$scratch/instruction.json" "$scratch/response.json"
 request PUT /v1/items/example-instruction/archive 200 \
     --header "Authorization: Bearer $token" --header "If-Match: $instruction_revision"
 jq --exit-status '.archived == true and .schedule.kind == "instruction"' "$scratch/response.json" >/dev/null
+
+cat > "$scratch/registry-report.json" <<'JSON'
+{"status":"ready","instance_id":"example-instance","base_url":null,"targets":[{"kind":"device","id":"example-device","name":"Example appliance","disabled":false},{"kind":"entity","id":"example-entity","name":"Example temperature","disabled":false,"entity_id":"sensor.example_temperature","device_id":"example-device"}]}
+JSON
+request PUT /v1/integration/registry 403 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' --data-binary "@$scratch/registry-report.json"
+request PUT /v1/integration/registry 204 \
+    --header "Authorization: Bearer $integration_token" \
+    --header 'X-Maintenance-System-Actor: ha:integration' \
+    --header 'Content-Type: application/json' --data-binary "@$scratch/registry-report.json"
+request GET /v1/home-assistant/registry 403 --header "Authorization: Bearer $integration_token"
+request GET /v1/home-assistant/registry 200 --header "Authorization: Bearer $token"
+jq --exit-status '.status == "ready" and (.targets | length) == 2' "$scratch/response.json" >/dev/null
+request POST /v1/items 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-linked-item' \
+    --data '{"id":"example-linked-item","name":"Example appliance","summary":"Inspect example appliance","timezone":"Etc/UTC","home_assistant":[{"kind":"device","instance_id":"example-instance","id":"example-device"},{"kind":"entity","instance_id":"example-instance","id":"example-entity"}]}'
+jq --exit-status '(.home_assistant | length) == 2' "$scratch/response.json" >/dev/null
+cp "$scratch/response.json" "$scratch/linked-item.json"
+stop_container
+start_container
+request GET /v1/home-assistant/registry 200 --header "Authorization: Bearer $token"
+jq --exit-status '.status == "not_connected"' "$scratch/response.json" >/dev/null
+request GET /v1/items/example-linked-item 200 --header "Authorization: Bearer $token"
+cmp --silent "$scratch/linked-item.json" "$scratch/response.json"
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, strict recurring dates, protected instructions, restart, and cold backup/restore."
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, strict recurring dates, protected instructions, HA device links, ephemeral registry, restart, and cold backup/restore."

@@ -1214,7 +1214,11 @@ fn create_fingerprint(input: &CreateItem) -> Result<Vec<u8>, Error> {
         resources: &'a [crate::models::Resource],
         reorder_url: &'a Option<String>,
     }
-    if let (Some(due), Schedule::Recurring { interval }) = (input.due, input.definition.schedule) {
+    if let (Some(due), Schedule::Recurring { interval }, true) = (
+        input.due,
+        input.definition.schedule,
+        input.definition.home_assistant.is_empty(),
+    ) {
         let definition = &input.definition;
         fingerprint(
             "create",

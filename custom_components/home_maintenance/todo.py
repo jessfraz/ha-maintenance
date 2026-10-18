@@ -105,7 +105,7 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
                 completed=(
                     item.completed_at if item.status is ItemStatus.COMPLETED else None
                 ),
-                description=item.task_description,
+                description=self.coordinator.item_description(item),
             )
             for item in self.coordinator.data.items
             if not item.archived and item.schedule_kind is not ScheduleKind.INSTRUCTION
@@ -131,13 +131,16 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             raise ServiceValidationError(
                 "This maintenance occurrence is no longer active"
             )
+        displayed = next(
+            (shown for shown in self.todo_items or () if shown.uid == item.uid), None
+        )
         if (
             item.status != TodoItemStatus.COMPLETED
             or (item.summary is not None and item.summary != current.summary)
             or (item.due is not None and item.due != current.due)
             or (
                 item.description is not None
-                and item.description != current.task_description
+                and (displayed is None or item.description != displayed.description)
             )
         ):
             raise ServiceValidationError(
@@ -171,7 +174,7 @@ class MaintenanceInstructions(MaintenanceTodo):
             TodoItem(
                 uid=str(item.occurrence_id),
                 summary=item.summary,
-                description=item.task_description,
+                description=self.coordinator.item_description(item),
             )
             for item in self.coordinator.data.items
             if not item.archived and item.schedule_kind is ScheduleKind.INSTRUCTION

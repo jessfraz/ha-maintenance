@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Link each maintenance item to multiple Home Assistant devices and entities, with the same objects shared across tasks.
+- Choose links by name or entity ID in the editor. Stable registry IDs preserve associations through renames; missing and disabled objects retain their links.
+- Open linked objects in HA and include their links in native to-do and calendar descriptions.
+- Keep the bounded registry catalog in memory and persist only explicitly selected references. Offline, unavailable, and foreign-instance links remain visible for repair.
+
 ## 0.4.0
 
 - Standing instructions stay visible in a separate, read-only list and cannot be completed. Only the Home Assistant owner can edit or remove them.

@@ -10,6 +10,8 @@ from aiohttp import web
 from homeassistant.auth.const import GROUP_ID_USER
 from homeassistant.auth.providers import AuthProvider
 from homeassistant.core import HomeAssistant, ServiceResponse
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util.json import JsonObjectType
 from pytest_aiohttp.plugin import AiohttpServer
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
@@ -27,6 +29,50 @@ OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617e"
 NEXT_OCCURRENCE_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb617f"
 STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6180"
 SECOND_STEP_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6181"
+
+
+@dataclass(frozen=True)
+class RegisteredObjects:
+    """Stable keys for fictional objects created through HA's real registries."""
+
+    device_id: str
+    registry_id: str
+    entity_id: str
+
+
+@pytest.fixture
+def registered_objects(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    entity_registry: er.EntityRegistry,
+) -> RegisteredObjects:
+    source = MockConfigEntry(domain="test")
+    source.add_to_hass(hass)
+    device = device_registry.async_get_or_create(
+        config_entry_id=source.entry_id,
+        identifiers={("test", "example-appliance")},
+        name="Example appliance",
+        serial_number="excluded-example-serial",
+        model="excluded-example-model",
+    )
+    entity = entity_registry.async_get_or_create(
+        "sensor",
+        "test",
+        "example-temperature",
+        config_entry=source,
+        device_id=device.id,
+        suggested_object_id="example_temperature",
+        original_name="Example temperature",
+    )
+    hass.states.async_set(
+        entity.entity_id,
+        "excluded-example-state",
+        {
+            "friendly_name": "Example temperature",
+            "private_attribute": "excluded-example-attribute",
+        },
+    )
+    return RegisteredObjects(device.id, entity.id, entity.entity_id)
 
 
 def entity_items(
@@ -135,6 +181,8 @@ class Backend:
         if response := self.responses.get((request.method, request.path)):
             status, body, headers = response
             return web.Response(status=status, body=body, headers=headers)
+        if request.path == "/v1/integration/registry" and request.method == "PUT":
+            return web.Response(status=204)
         if request.path == "/v1/system":
             return web.json_response({"credential_role": self.role})
         if request.path == "/v1/summary":

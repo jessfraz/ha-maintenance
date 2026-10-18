@@ -61,6 +61,21 @@ the existing reversible archive; only the owner can restore it. The integration
 announces the authenticated HA owner identity for ingress authorization. Missing
 or expired identity evidence denies protected changes until a fresh check-in.
 
+An item can link to several Home Assistant devices or entities, and each device
+or entity can have several maintenance items. Choose them in the item's **Home
+Assistant** section. Links use stable registry IDs scoped to the HA instance,
+so entity renames retain the association. Current names and native HA links
+appear in the dashboard, to-do descriptions, and calendar descriptions.
+Missing or disabled objects retain their saved links for review. Schedules and
+completion history stay with the maintenance item.
+
+Only selected references are stored in SQLite. The integration supplies a
+bounded registry catalog in memory, refreshed every minute and after registry
+changes. It contains display names, IDs, device relationships, and disabled
+flags; entity states and hardware attributes stay in Home Assistant. A stale
+or unavailable catalog prevents choosing new links while existing references
+remain editable.
+
 Checklist steps belong to the current occurrence. Checking a step records its
 actor and time without completing the item. Explicitly completing the item
 saves a snapshot of its checklist, including unchecked steps, and creates the
@@ -123,6 +138,7 @@ OpenAPI document with `just openapi`.
 | Read completion history | `GET /v1/items/{id}/events` |
 | Archive or restore an item | `PUT /v1/items/{id}/archive`, `DELETE /v1/items/{id}/archive` |
 | Counts and authenticated service status | `GET /v1/summary`, `GET /v1/system` |
+| HA device/entity catalog (administrators) | `GET /v1/home-assistant/registry` |
 
 Use bearer authentication for `/v1` routes. Mutations of existing items require
 `If-Match` with the item's ETag. Creation, step changes, and completion require

@@ -36,14 +36,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MaintenanceConfigEntry) 
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    coordinator.async_listen_to_registries()
 
     @callback
     def report_loaded() -> None:
-        if entry.state is ConfigEntryState.LOADED and entry.data.get(CONF_ADDON_SLUG):
-            # A second authenticated poll proves setup actually reached LOADED.
+        if entry.state is ConfigEntryState.LOADED:
+            # The paired app also needs its loaded installation check-in.
             # Entry-owned work is cancelled if unloading starts during the report.
             entry.async_create_background_task(
-                hass, coordinator.async_refresh(), "Maintenance loaded check-in"
+                hass,
+                coordinator.async_refresh()
+                if entry.data.get(CONF_ADDON_SLUG)
+                else coordinator.async_report_registry(),
+                "Maintenance loaded check-in",
             )
 
     entry.async_on_unload(entry.async_on_state_change(report_loaded))

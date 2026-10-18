@@ -103,6 +103,7 @@ fn input(id: &str) -> CreateItem {
             specs: vec![],
             resources: vec![],
             reorder_url: None,
+            home_assistant: vec![],
         },
     }
 }
@@ -3081,6 +3082,567 @@ async fn instruction_constraints_and_transactional_management_prevent_bypasses()
             assert_eq!(current.definition.schedule, Schedule::Once);
         }
         other => panic!("unexpected concurrent results: {other:?}"),
+    }
+    f.finish().await;
+}
+
+fn example_ha_reference(
+    kind: home_maintenance::home_assistant::ReferenceKind,
+    id: &str,
+) -> home_maintenance::home_assistant::HomeAssistantReference {
+    home_maintenance::home_assistant::HomeAssistantReference {
+        kind,
+        instance_id: "example-instance".to_owned().try_into().unwrap(),
+        id: id.to_owned().try_into().unwrap(),
+    }
+}
+
+fn example_registry() -> home_maintenance::home_assistant::RegistrySnapshot {
+    use home_maintenance::home_assistant::RegistryTarget;
+    home_maintenance::home_assistant::RegistrySnapshot {
+        instance_id: "example-instance".to_owned().try_into().unwrap(),
+        base_url: Some("https://example.invalid".to_owned().try_into().unwrap()),
+        targets: vec![
+            RegistryTarget::Device {
+                id: "example-device".to_owned().try_into().unwrap(),
+                name: "Example device".into(),
+                disabled: false,
+            },
+            RegistryTarget::Entity {
+                id: "example-entity".to_owned().try_into().unwrap(),
+                name: "Example measurement".into(),
+                disabled: false,
+                entity_id: "sensor.example_measurement".to_owned().try_into().unwrap(),
+                device_id: Some("example-device".to_owned().try_into().unwrap()),
+            },
+        ],
+    }
+}
+
+async fn publish_registry(
+    f: &Fixture,
+    report: &home_maintenance::home_assistant::RegistryReport,
+) -> Response {
+    f.client
+        .put(format!("{}/v1/integration/registry", f.origin))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .json(report)
+        .send()
+        .await
+        .unwrap()
+}
+async fn get_registry(f: &Fixture) -> home_maintenance::home_assistant::RegistryCatalog {
+    f.client
+        .get(format!("{}/v1/home-assistant/registry", f.origin))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn home_assistant_references_are_scoped_many_to_many_and_preserved_by_item_lifecycle() {
+    use home_maintenance::home_assistant::{ReferenceKind, RegistryCatalog};
+    let f = Fixture::new().await;
+    let references = vec![
+        example_ha_reference(ReferenceKind::Device, "example-device"),
+        example_ha_reference(ReferenceKind::Entity, "example-entity"),
+    ];
+    let mut first = input("example-linked-first");
+    first.definition.home_assistant = references.clone();
+    let response = f
+        .client
+        .post(format!("{}/v1/items", f.origin))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", "linked-first")
+        .json(&first)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let item: Item = response.json().await.unwrap();
+    assert_eq!(item.definition.home_assistant, references);
+    assert_eq!(get_registry(&f).await, RegistryCatalog::NotConnected); // Offline definitions remain valid.
+    let mut changed_request = first.clone();
+    changed_request.definition.home_assistant[0].id =
+        "different-device".to_owned().try_into().unwrap();
+    assert_eq!(
+        f.client
+            .post(format!("{}/v1/items", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", "linked-first")
+            .json(&changed_request)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let mut second = first.clone();
+    second.id = "example-linked-second".to_owned().try_into().unwrap();
+    let imported: Page<Item> = f
+        .client
+        .post(format!("{}/v1/imports", f.origin))
+        .bearer_auth(OWNER)
+        .json(&ImportCatalog {
+            items: vec![second],
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(imported.items[0].definition.home_assistant, references);
+    let mut migrated = migration_item("example-linked-migrated");
+    migrated.item.definition.home_assistant = references.clone();
+    let response = migration_request(
+        &f,
+        &home_maintenance::models::Migration {
+            items: vec![migrated],
+        },
+        false,
+        "linked-migration",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    assert_eq!(
+        f.get("example-linked-migrated")
+            .await
+            .definition
+            .home_assistant,
+        references
+    );
+    let edited: Item = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .json(&UpdateItem {
+            summary: Change(Some("Updated linked task".into())),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(edited.definition.home_assistant, references);
+    let completed: Item = complete(&f, &edited, "linked-completion")
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(completed.definition.home_assistant, references);
+    let archived: Item = f
+        .client
+        .put(format!(
+            "{}/v1/items/{}/archive",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", completed.revision))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(archived.definition.home_assistant, references);
+    let restored: Item = f
+        .client
+        .delete(format!(
+            "{}/v1/items/{}/archive",
+            f.origin,
+            item.id.as_ref()
+        ))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", archived.revision))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored.definition.home_assistant, references);
+    assert_eq!(
+        publish_registry(
+            &f,
+            &home_maintenance::home_assistant::RegistryReport::Ready(example_registry())
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    f.server.close().await.unwrap();
+    f.store.close().await.unwrap();
+    let reopened = Store::open(&f.directory.path().join("maintenance.sqlite3"))
+        .await
+        .unwrap();
+    let persisted = reopened.get(&item.id).await.unwrap();
+    assert_eq!(persisted.definition.home_assistant, references);
+    assert_eq!(persisted.revision, restored.revision);
+    let restarted = api::start(
+        ([127, 0, 0, 1], 0).into(),
+        Arc::new(Context::new(reopened.clone(), OWNER)),
+    )
+    .unwrap();
+    let catalog: RegistryCatalog = f
+        .client
+        .get(format!(
+            "http://{}/v1/home-assistant/registry",
+            restarted.local_addr()
+        ))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog, RegistryCatalog::NotConnected);
+    restarted.close().await.unwrap();
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn home_assistant_reference_validation_rejects_invalid_edits_atomically() {
+    use home_maintenance::home_assistant::ReferenceKind;
+    let f = Fixture::new().await;
+    let original = f.create("example-reference-validation").await;
+    let reference = example_ha_reference(ReferenceKind::Entity, "example-entity");
+    for references in [
+        vec![reference.clone(), reference.clone()],
+        (0..101)
+            .map(|index| example_ha_reference(ReferenceKind::Entity, &format!("example-{index}")))
+            .collect(),
+    ] {
+        let response = f
+            .client
+            .patch(format!("{}/v1/items/{}", f.origin, original.id.as_ref()))
+            .bearer_auth(OWNER)
+            .header("If-Match", format!("\"{}\"", original.revision))
+            .json(&UpdateItem {
+                home_assistant: Change(Some(references)),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    for invalid in [
+        r#"{"home_assistant":null}"#,
+        r#"{"home_assistant":[{"kind":"entity","instance_id":"example-instance","id":"sensor.example"}]}"#,
+        r#"{"home_assistant":[{"kind":"entity","instance_id":"","id":"example-entity"}]}"#,
+        r#"{"home_assistant":[{"kind":"scene","instance_id":"example-instance","id":"example-entity"}]}"#,
+        r#"{"home_assistant":[{"kind":"entity","instance_id":"example-instance","id":"example-entity","name":"extra-field"}]}"#,
+    ] {
+        let response = f
+            .client
+            .patch(format!("{}/v1/items/{}", f.origin, original.id.as_ref()))
+            .bearer_auth(OWNER)
+            .header("If-Match", format!("\"{}\"", original.revision))
+            .header("Content-Type", "application/json")
+            .body(invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(
+        f.get(original.id.as_ref()).await.revision,
+        original.revision
+    );
+    let mut another_instance = reference.clone();
+    another_instance.instance_id = "another-instance".to_owned().try_into().unwrap();
+    let references = vec![
+        reference.clone(),
+        another_instance,
+        example_ha_reference(ReferenceKind::Device, "example-entity"),
+    ];
+    let updated: Item = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, original.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", original.revision))
+        .json(&UpdateItem {
+            home_assistant: Change(Some(references.clone())),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated.definition.home_assistant, references);
+    let cleared: Item = f
+        .client
+        .patch(format!("{}/v1/items/{}", f.origin, original.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", updated.revision))
+        .json(&UpdateItem {
+            home_assistant: Change(Some(vec![])),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(cleared.definition.home_assistant.is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn registry_catalog_has_separate_publish_and_admin_read_authorities() {
+    use home_maintenance::home_assistant::{
+        RegistryCatalog, RegistryReport, RegistryUnavailableReason,
+    };
+    let f = Fixture::new().await;
+    assert_eq!(get_registry(&f).await, RegistryCatalog::NotConnected);
+    let snapshot = example_registry();
+    let ready = RegistryReport::Ready(snapshot.clone());
+    for (token, system, user, admin) in [
+        (OWNER, Some("ha:integration"), None, false),
+        (INTEGRATION, Some("ha:automation"), None, true),
+        (INTEGRATION, None, Some("ha:example-admin"), true),
+    ] {
+        let mut request = f
+            .client
+            .put(format!("{}/v1/integration/registry", f.origin))
+            .bearer_auth(token)
+            .header("X-Maintenance-Admin", admin.to_string())
+            .header("X-Maintenance-Owner", "true")
+            .json(&ready);
+        if let Some(system) = system {
+            request = request.header("X-Maintenance-System-Actor", system);
+        }
+        if let Some(user) = user {
+            request = request.header("X-Maintenance-Actor-Id", user);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        publish_registry(&f, &ready).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        get_registry(&f).await,
+        RegistryCatalog::Ready(snapshot.clone())
+    );
+    for actor in [None, Some("ha:example-user")] {
+        let mut request = f
+            .client
+            .get(format!("{}/v1/home-assistant/registry", f.origin))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-Owner", "true");
+        if let Some(actor) = actor {
+            request = request.header("X-Maintenance-Actor-Id", actor);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !response
+                .text()
+                .await
+                .unwrap()
+                .contains("Example measurement")
+        );
+    }
+    let response = f
+        .client
+        .get(format!("{}/v1/home-assistant/registry", f.origin))
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-Actor-Id", "ha:example-admin")
+        .header("X-Maintenance-Admin", "true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        response.json::<RegistryCatalog>().await.unwrap(),
+        RegistryCatalog::Ready(snapshot.clone())
+    );
+    let context = Context::new(f.store.clone(), OWNER)
+        .with_integration(INTEGRATION)
+        .for_ingress(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let ingress = api::start(([127, 0, 0, 1], 0).into(), Arc::new(context)).unwrap();
+    let response = f
+        .client
+        .put(format!(
+            "http://{}/v1/integration/registry",
+            ingress.local_addr()
+        ))
+        .header("X-Remote-User-Id", "example-owner")
+        .header("X-Maintenance-Request", "1")
+        .header("X-Maintenance-System-Actor", "ha:integration")
+        .bearer_auth(INTEGRATION)
+        .json(&ready)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    ingress.close().await.unwrap();
+    let unavailable = RegistryReport::Unavailable {
+        instance_id: snapshot.instance_id.clone(),
+        reason: RegistryUnavailableReason::LimitExceeded,
+    };
+    assert_eq!(
+        publish_registry(&f, &unavailable).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        get_registry(&f).await,
+        RegistryCatalog::Unavailable {
+            instance_id: snapshot.instance_id,
+            reason: RegistryUnavailableReason::LimitExceeded
+        }
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn registry_publication_validates_whole_reports_and_route_specific_size_limits() {
+    use home_maintenance::home_assistant::{RegistryCatalog, RegistryReport, RegistryTarget};
+    let f = Fixture::new().await;
+    let snapshot = example_registry();
+    assert_eq!(
+        publish_registry(&f, &RegistryReport::Ready(snapshot.clone()))
+            .await
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    for invalid in [
+        r#"{"status":"ready","instance_id":"example-instance","base_url":"javascript:alert(1)","targets":[]}"#,
+        r#"{"status":"ready","instance_id":"example-instance","base_url":"https://example.invalid/?token=example","targets":[]}"#,
+        r#"{"status":"ready","instance_id":"example-instance","base_url":null,"targets":[{"kind":"device","id":"sensor.example","name":"Example","disabled":false}]}"#,
+        r#"{"status":"ready","instance_id":"example-instance","base_url":null,"targets":[{"kind":"scene","id":"example","name":"Example","disabled":false}]}"#,
+        r#"{"status":"ready","instance_id":"example-instance","base_url":null,"targets":[{"kind":"entity","id":"example","name":"Example","disabled":false,"entity_id":"invalid","device_id":null}]}"#,
+        r#"{"status":"ready","instance_id":"example-instance","base_url":null,"targets":[],"states":[]}"#,
+    ] {
+        let response = f
+            .client
+            .put(format!("{}/v1/integration/registry", f.origin))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-System-Actor", "ha:integration")
+            .header("Content-Type", "application/json")
+            .body(invalid)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let mut duplicate = snapshot.clone();
+    duplicate.targets.push(duplicate.targets[0].clone());
+    assert_eq!(
+        publish_registry(&f, &RegistryReport::Ready(duplicate))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let mut bad_name = snapshot.clone();
+    bad_name.targets = vec![RegistryTarget::Device {
+        id: "example-device".to_owned().try_into().unwrap(),
+        name: "example\ncontrol".into(),
+        disabled: false,
+    }];
+    assert_eq!(
+        publish_registry(&f, &RegistryReport::Ready(bad_name))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        get_registry(&f).await,
+        RegistryCatalog::Ready(snapshot.clone())
+    );
+    let targets: Vec<_> = (0..20_000)
+        .map(|index| RegistryTarget::Device {
+            id: format!("example-{index}").try_into().unwrap(),
+            name: format!("Example device {index}"),
+            disabled: false,
+        })
+        .collect();
+    let mut large = home_maintenance::home_assistant::RegistrySnapshot {
+        targets,
+        ..snapshot
+    };
+    let report = RegistryReport::Ready(large.clone());
+    assert!(serde_json::to_vec(&report).unwrap().len() > 512 * 1024);
+    assert_eq!(
+        publish_registry(&f, &report).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let response = f
+        .client
+        .post(format!("{}/v1/imports", f.origin))
+        .bearer_auth(OWNER)
+        .json(&report)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: dropshot::HttpErrorResponseBody = response.json().await.unwrap();
+    assert_eq!(
+        error.message,
+        "request body exceeded maximum size of 524288 bytes"
+    );
+    large.targets.push(RegistryTarget::Device {
+        id: "one-too-many".to_owned().try_into().unwrap(),
+        name: "One too many".into(),
+        disabled: false,
+    });
+    assert_eq!(
+        publish_registry(&f, &RegistryReport::Ready(large.clone()))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    large.targets = vec![RegistryTarget::Device {
+        id: "oversized".to_owned().try_into().unwrap(),
+        name: "x".repeat(8 * 1024 * 1024),
+        disabled: false,
+    }];
+    let response = publish_registry(&f, &RegistryReport::Ready(large)).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: dropshot::HttpErrorResponseBody = response.json().await.unwrap();
+    assert_eq!(
+        error.message,
+        "request body exceeded maximum size of 8388608 bytes"
+    );
+    match get_registry(&f).await {
+        RegistryCatalog::Ready(snapshot) => assert_eq!(snapshot.targets.len(), 20_000),
+        other => panic!("invalid report replaced ready catalog: {other:?}"),
     }
     f.finish().await;
 }

@@ -247,6 +247,15 @@
             "$ref": "#/$defs/resource"
           },
           "maxItems": 100
+        },
+        "home_assistant": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/home_assistant_reference"
+          }
         }
       },
       "allOf": [
@@ -366,6 +375,35 @@
           }
         }
       ]
+    },
+    "home_assistant_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "instance_id",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "device",
+            "entity"
+          ]
+        },
+        "instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      }
     }
   }
 }

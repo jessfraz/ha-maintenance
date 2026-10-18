@@ -19,6 +19,7 @@ _REORDER_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/reorders")
 _ROUTES = (
     (re.compile(r"items"), frozenset({"GET", "POST"})),
     (re.compile(r"summary|system"), frozenset({"GET"})),
+    (re.compile(r"home-assistant/registry"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/events"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/completions"), frozenset({"POST"})),
@@ -73,6 +74,8 @@ class MaintenanceView(HomeAssistantView):
             raise web.HTTPBadRequest(reason="Unsupported query parameters")
         user = request["hass_user"]
         if not user.is_active:
+            raise web.HTTPForbidden
+        if path == "home-assistant/registry" and not user.is_admin:
             raise web.HTTPForbidden
         admin_only = request.method != "GET" and not (
             path.endswith("/completions")

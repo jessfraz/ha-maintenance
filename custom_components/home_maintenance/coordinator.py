@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from datetime import timedelta
 from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urlencode
@@ -10,14 +11,20 @@ from uuid import UUID
 
 from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.const import EVENT_CORE_CONFIG_UPDATE
+from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import instance_id
+from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import Actor, MaintenanceClient, ResponseTooLarge
 from .const import CONF_ADDON_SLUG, DOMAIN, SUMMARY_KEYS
 from .models import MaintenanceData, MaintenanceItem
+from .registry import describe_references, registry_payload, unavailable_payload
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -61,6 +68,58 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
         self.client = client
         self._entry = entry
         self._version = version
+        self._instance_id: str | None = None
+        self._registry_lock = asyncio.Lock()
+        self._registry_debouncer = Debouncer(
+            hass,
+            _LOGGER,
+            cooldown=0.5,
+            immediate=False,
+            function=self._async_registry_changed,
+        )
+
+    @callback
+    def async_listen_to_registries(self) -> None:
+        """Own registry listeners and their debounce timer for this entry's lifetime."""
+        self._entry.async_on_unload(
+            self.hass.bus.async_listen(
+                er.EVENT_ENTITY_REGISTRY_UPDATED, self._registry_updated
+            )
+        )
+        self._entry.async_on_unload(
+            self.hass.bus.async_listen(
+                dr.EVENT_DEVICE_REGISTRY_UPDATED, self._registry_updated
+            )
+        )
+        self._entry.async_on_unload(
+            self.hass.bus.async_listen(EVENT_CORE_CONFIG_UPDATE, self._registry_updated)
+        )
+        self._entry.async_on_unload(self._registry_debouncer.async_shutdown)
+
+    @callback
+    def _registry_updated[T: Mapping[str, object]](self, event: Event[T]) -> None:
+        if self._entry.state is ConfigEntryState.LOADED:
+            self._registry_debouncer.async_schedule_call()
+
+    @callback
+    def _async_registry_changed(self) -> None:
+        if self._entry.state is not ConfigEntryState.LOADED:
+            return
+        # Registry names are projected locally, even when backend items are unchanged.
+        self.async_update_listeners()
+        self._entry.async_create_background_task(
+            self.hass, self.async_report_registry(), "Maintenance registry update"
+        )
+
+    def item_description(self, item: MaintenanceItem) -> str | None:
+        """Use the same description for native display and native completion checks."""
+        links = describe_references(self.hass, self._instance_id, item.home_assistant)
+        return (
+            "\n\n".join(
+                section for section in (item.task_description, links) if section
+            )
+            or None
+        )
 
     async def _async_update_data(self) -> MaintenanceData:
         try:
@@ -76,10 +135,38 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
                 raise UpdateFailed("The backend returned an invalid summary")
             summary = {key: data[key] for key in SUMMARY_KEYS}
             items = await self._async_items()
+            if self._instance_id is None:
+                self._instance_id = await instance_id.async_get(self.hass)
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
             raise UpdateFailed("Cannot read the backend task inventory") from err
         await self._async_report_presence()
+        await self.async_report_registry()
         return MaintenanceData(summary, items)
+
+    async def async_report_registry(self) -> None:
+        """Publish optional HA metadata without affecting task availability."""
+        async with self._registry_lock:
+            if (
+                self._entry.state is not ConfigEntryState.LOADED
+                or self._instance_id is None
+            ):
+                return
+            try:
+                payload = registry_payload(self.hass, self._instance_id)
+            except HomeAssistantError, ValueError:
+                payload = unavailable_payload(self._instance_id, "unavailable")
+            try:
+                response = await self.client.request(
+                    "PUT",
+                    "/v1/integration/registry",
+                    body=payload,
+                    actor=Actor(system_actor="ha:integration"),
+                )
+            except ClientError, TimeoutError, ResponseTooLarge:
+                _LOGGER.debug("Cannot send the Home Assistant registry catalog")
+                return
+            if response.status != 204:
+                _LOGGER.debug("The backend could not accept its registry catalog")
 
     async def _async_items(self) -> tuple[MaintenanceItem, ...]:
         """Follow the service's cursor without silently dropping later tasks."""
@@ -88,11 +175,21 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
         seen_ids: set[str] = set()
         seen_occurrences: set[UUID] = set()
         page_token: str | None = None
+        page_limit = 200
         while True:
-            query = {"limit": "200"}
+            query = {"limit": str(page_limit)}
             if page_token is not None:
                 query["page_token"] = page_token
-            response = await self.client.request("GET", f"/v1/items?{urlencode(query)}")
+            try:
+                response = await self.client.request(
+                    "GET", f"/v1/items?{urlencode(query)}"
+                )
+            except ResponseTooLarge:
+                if page_limit == 1:
+                    raise
+                # Retry the same cursor: no partial page has been consumed.
+                page_limit = max(1, page_limit // 2)
+                continue
             if response.status in {401, 403}:
                 raise ConfigEntryAuthFailed("The backend rejected its credential")
             if response.status != 200:

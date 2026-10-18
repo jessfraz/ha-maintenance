@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout
 
-from .const import MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS
+from .const import MAX_REGISTRY_BYTES, MAX_RESPONSE_BYTES, REQUEST_TIMEOUT_SECONDS
 
 
 class InvalidBackendURL(ValueError):
@@ -120,10 +120,15 @@ class MaintenanceClient:
             allow_redirects=False,
             timeout=ClientTimeout(total=REQUEST_TIMEOUT_SECONDS),
         ) as response:
+            response_limit = (
+                MAX_REGISTRY_BYTES
+                if method == "GET" and path == "/v1/home-assistant/registry"
+                else MAX_RESPONSE_BYTES
+            )
             payload = bytearray()
             async for chunk in response.content.iter_chunked(16 * 1024):
                 payload.extend(chunk)
-                if len(payload) > MAX_RESPONSE_BYTES:
+                if len(payload) > response_limit:
                     raise ResponseTooLarge
             public_headers = {
                 header: response.headers[header]

@@ -13,6 +13,7 @@ from custom_components.home_maintenance.const import (
     CONF_BACKEND_URL,
     CONF_TOKEN,
     DOMAIN,
+    MAX_RESPONSE_BYTES,
 )
 
 from .conftest import (
@@ -166,3 +167,34 @@ async def test_partial_inventory_auth_failure_requests_reauthentication(
         flow["context"].get("entry_id") == entry.entry_id
         for flow in hass.config_entries.flow.async_progress()
     )
+
+
+async def test_single_oversized_item_preserves_snapshot_and_stops_retrying(
+    hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
+) -> None:
+    previous = entry.runtime_data.data
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        b"x" * (MAX_RESPONSE_BYTES + 1),
+        {},
+    )
+    before = len(backend.requests)
+    await entry.runtime_data.async_refresh()
+    assert not entry.runtime_data.last_update_success
+    assert entry.runtime_data.data == previous
+    pages = [
+        request for request in backend.requests[before:] if request.path == "/v1/items"
+    ]
+    assert [request.query["limit"] for request in pages] == [
+        "200",
+        "100",
+        "50",
+        "25",
+        "12",
+        "6",
+        "3",
+        "1",
+    ]
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "unavailable"

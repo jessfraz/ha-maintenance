@@ -309,6 +309,19 @@
             </div>
             <div id="resource-rows"></div>
           </section>
+          <section class="editor-section" aria-labelledby="ha-editor-title">
+            <h3 id="ha-editor-title">Home Assistant</h3>
+            <ul id="ha-selected" class="ha-targets"></ul>
+            <details id="ha-picker">
+              <summary>Link a device or entity</summary>
+              <label for="ha-search">Search
+                <input id="ha-search" type="search" autocomplete="off"
+                  placeholder="Device name or entity ID">
+              </label>
+              <p id="ha-search-status" class="muted" role="status"></p>
+              <ul id="ha-results" class="ha-targets"></ul>
+            </details>
+          </section>
           <label for="reorder-url"
             >Reorder link<input
               id="reorder-url"
