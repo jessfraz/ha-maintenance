@@ -20,7 +20,7 @@ _ROUTES = (
     (re.compile(r"items"), frozenset({"GET", "POST"})),
     (re.compile(r"summary|system"), frozenset({"GET"})),
     (re.compile(r"home-assistant/registry"), frozenset({"GET"})),
-    (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH"})),
+    (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH", "DELETE"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/events"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/completions"), frozenset({"POST"})),
     (_REORDER_ROUTE, frozenset({"POST"})),

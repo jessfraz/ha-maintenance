@@ -50,9 +50,15 @@ pub struct Store {
 const EVENT_LIST: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist,source FROM completions WHERE item_id=? ORDER BY sequence DESC LIMIT ?";
 const EVENT_LIST_NEXT: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist,source FROM completions WHERE item_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?";
 const IDEMPOTENCY_GET: &str =
-    "SELECT fingerprint,response FROM idempotency WHERE actor=? AND key=?";
+    "SELECT fingerprint,response,invalidated FROM idempotency WHERE actor=? AND key=?";
 const IDEMPOTENCY_INSERT: &str =
     "INSERT INTO idempotency(actor,key,fingerprint,response) VALUES(?,?,?,?)";
+const ITEM_RECEIPTS_INVALIDATE: &str = "UPDATE idempotency SET response='null',invalidated=1 WHERE invalidated=0 AND json_type(response,'$.occurrence')='object' AND json_extract(response,'$.id')=?";
+const DELETED_ITEM_GET: &str = "SELECT revision,owner_only FROM deleted_items WHERE id=?";
+const DELETED_ITEM_INSERT: &str = "INSERT INTO deleted_items(id,revision,owner_only) VALUES(?,?,?)";
+const ITEM_UNLINK_COMPLETION: &str = "UPDATE items SET last_completion_id=NULL WHERE id=?";
+const ITEM_COMPLETIONS_DELETE: &str = "DELETE FROM completions WHERE item_id=?";
+const ITEM_DELETE: &str = "DELETE FROM items WHERE id=?";
 const ITEM_INSERT: &str =
     "INSERT INTO items(id,definition,revision,occurrence_id,due,checklist) VALUES(?,?,1,?,?,?)";
 const ITEM_UPDATE: &str = "UPDATE items SET definition=?,due=?,checklist=?,revision=? WHERE id=?";
@@ -73,6 +79,8 @@ const REORDER_RESOLVE: &str =
     "UPDATE reorders SET status=?,revision=?,resolved_at=?,resolved_by=? WHERE id=?";
 const MIGRATION_SOURCES: &str = "SELECT source_key,target_id,fingerprint FROM migration_sources WHERE source_key IN (SELECT value FROM json_each(?))";
 const MIGRATION_TARGETS: &str = "SELECT id FROM items WHERE id IN (SELECT value FROM json_each(?))";
+const MIGRATION_DELETED_TARGETS: &str =
+    "SELECT id FROM deleted_items WHERE id IN (SELECT value FROM json_each(?))";
 const MIGRATION_EVENT_IDS: &str =
     "SELECT id FROM completions WHERE id IN (SELECT value FROM json_each(?))";
 const MIGRATION_OCCURRENCES: &str = "SELECT occurrence_id FROM completions WHERE occurrence_id IN (SELECT value FROM json_each(?1)) UNION ALL SELECT occurrence_id FROM items WHERE occurrence_id IN (SELECT value FROM json_each(?1))";
@@ -91,6 +99,11 @@ struct ReorderRow {
     revision: i64,
     resolved_at: Option<String>,
     resolved_by: Option<String>,
+}
+#[derive(FromRow)]
+struct DeletedItemRow {
+    revision: i64,
+    owner_only: bool,
 }
 impl TryFrom<ReorderRow> for Reorder {
     type Error = Error;
@@ -576,6 +589,59 @@ impl Store {
         transaction.commit().await?;
         Ok(result)
     }
+    /// Remove an archived item and its history, preserving independent action
+    /// receipts and reserving its identity against later imports and retries.
+    pub async fn delete(
+        &self,
+        id: &ItemId,
+        revision: i64,
+        management: Management,
+    ) -> Result<(), Error> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(deleted) = deleted_item(&mut transaction, id).await? {
+            if deleted.owner_only && !matches!(management, Management::Owner) {
+                return Err(Error::Forbidden);
+            }
+            if deleted.revision != revision {
+                return Err(Error::Precondition);
+            }
+            return Ok(());
+        }
+        let item = get_item(&mut transaction, id).await?;
+        management.check_instruction(item.definition.schedule)?;
+        check_revision(&item, revision)?;
+        if !item.archived {
+            return Err(Error::Conflict(
+                "archive the item before permanently deleting it",
+            ));
+        }
+        sqlx::query(DELETED_ITEM_INSERT)
+            .bind(id.as_ref())
+            .bind(revision)
+            .bind(item.definition.schedule == Schedule::Instruction)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(ITEM_RECEIPTS_INVALIDATE)
+            .bind(id.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        // The item points to its latest completion, and each completion points
+        // back to the item. Break the first reference before removing history.
+        sqlx::query(ITEM_UNLINK_COMPLETION)
+            .bind(id.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(ITEM_COMPLETIONS_DELETE)
+            .bind(id.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(ITEM_DELETE)
+            .bind(id.as_ref())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
     pub async fn complete(
         &self,
         id: &ItemId,
@@ -993,6 +1059,18 @@ async fn migration_report(
         .into_iter()
         .map(|(source, target, fingerprint)| (source, (target, fingerprint)))
         .collect::<BTreeMap<_, _>>();
+    let deletion_targets = targets
+        .iter()
+        .copied()
+        .chain(sources.values().map(|(target, _)| target.as_str()))
+        .collect::<BTreeSet<_>>();
+    let deleted_targets: BTreeSet<String> =
+        sqlx::query_scalar::<_, String>(MIGRATION_DELETED_TARGETS)
+            .bind(serde_json::to_string(&deletion_targets)?)
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
     let existing_targets: BTreeSet<String> = sqlx::query_scalar::<_, String>(MIGRATION_TARGETS)
         .bind(serde_json::to_string(&targets)?)
         .fetch_all(&mut *connection)
@@ -1044,8 +1122,14 @@ async fn migration_report(
         {
             conflicts.push("duplicate target id in migration".into());
         }
+        if deleted_targets.contains(item.item.id.as_ref()) {
+            conflicts.push("target item id was permanently deleted".into());
+        }
         let unchanged = if let Some((target, stored)) = sources.get(source) {
-            if target == item.item.id.as_ref() && *stored == fingerprint_item(item)? {
+            if deleted_targets.contains(target) {
+                conflicts.push("source item was permanently deleted".into());
+                false
+            } else if target == item.item.id.as_ref() && *stored == fingerprint_item(item)? {
                 true
             } else {
                 conflicts.push(
@@ -1176,6 +1260,9 @@ async fn get_reorder(connection: &mut SqliteConnection, id: Uuid) -> Result<Reor
     row.try_into()
 }
 async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> Result<(), Error> {
+    if deleted_item(connection, &input.id).await?.is_some() {
+        return Err(Error::Deleted);
+    }
     let result = sqlx::query(ITEM_INSERT)
         .bind(input.id.as_ref())
         .bind(serde_json::to_string(&input.definition)?)
@@ -1193,6 +1280,15 @@ async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> R
         }
         Err(error) => Err(error.into()),
     }
+}
+async fn deleted_item(
+    connection: &mut SqliteConnection,
+    id: &ItemId,
+) -> Result<Option<DeletedItemRow>, Error> {
+    Ok(sqlx::query_as(DELETED_ITEM_GET)
+        .bind(id.as_ref())
+        .fetch_optional(connection)
+        .await?)
 }
 fn create_fingerprint(input: &CreateItem) -> Result<Vec<u8>, Error> {
     // Keep the original canonical fingerprint for existing recurring creates.
@@ -1256,15 +1352,19 @@ async fn replay<T: serde::de::DeserializeOwned>(
     key: &str,
     fingerprint: &[u8],
 ) -> Result<Option<T>, Error> {
-    let row: Option<(Vec<u8>, String)> = sqlx::query_as(IDEMPOTENCY_GET)
+    let row: Option<(Vec<u8>, String, bool)> = sqlx::query_as(IDEMPOTENCY_GET)
         .bind(actor.key())
         .bind(key)
         .fetch_optional(connection)
         .await?;
     match row {
         None => Ok(None),
-        Some((stored, response)) if stored == fingerprint => {
-            Ok(Some(serde_json::from_str(&response)?))
+        Some((stored, response, invalidated)) if stored == fingerprint => {
+            if invalidated {
+                Err(Error::Deleted)
+            } else {
+                Ok(Some(serde_json::from_str(&response)?))
+            }
         }
         Some(_) => Err(Error::Conflict(
             "idempotency key was already used for a different request",
@@ -1837,7 +1937,7 @@ mod tests {
         sqlx::query(IDEMPOTENCY_INSERT)
             .bind(actor.key())
             .bind("old-reorder")
-            .bind(fingerprint("reorder", &(&original.id, 3_i64, &ReorderItem::default())).unwrap())
+            .bind(fingerprint("reorder", &(&original.id, 3_i64, ReorderItem::default())).unwrap())
             .bind(&reorder_json)
             .execute(&pool)
             .await
@@ -2682,5 +2782,1062 @@ mod tests {
             1
         );
         upgraded.close().await.unwrap();
+    }
+
+    fn deletion_input(id: &str) -> CreateItem {
+        let seed: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let mut input = seed.items.into_iter().next().unwrap();
+        input.id = id.to_owned().try_into().unwrap();
+        input
+    }
+
+    fn deletion_actor() -> Actor {
+        Actor::System {
+            id: SystemActor::Owner,
+            name: "Owner credential".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_removes_history_and_item_receipts_without_erasing_other_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("delete.sqlite3");
+        let store = Store::open(&path).await.unwrap();
+        let actor = deletion_actor();
+        let input = deletion_input("example-deleted");
+        let created = store
+            .create(input.clone(), &actor, "delete-create", Management::Owner)
+            .await
+            .unwrap();
+        let step_id = created.occurrence.checklist[0].id;
+        let step_request = SetChecklistStep {
+            occurrence_id: created.occurrence.id,
+            completed: true,
+        };
+        let checked = store
+            .set_checklist_step(
+                &created.id,
+                step_id,
+                created.revision,
+                step_request.clone(),
+                &actor,
+                "delete-checklist",
+            )
+            .await
+            .unwrap();
+        let completion_request = CompleteItem {
+            occurrence_id: checked.occurrence.id,
+        };
+        let completed = store
+            .complete(
+                &checked.id,
+                checked.revision,
+                completion_request.clone(),
+                &actor,
+                "delete-completion",
+            )
+            .await
+            .unwrap();
+        let reordered = store
+            .reorder(
+                &completed.id,
+                completed.revision,
+                ReorderItem::default(),
+                &actor,
+                "delete-reorder",
+            )
+            .await
+            .unwrap();
+        let unrelated_input = deletion_input("example-retained");
+        let unrelated = store
+            .create(
+                unrelated_input.clone(),
+                &actor,
+                "retained-create",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        let unrelated = store
+            .complete(
+                &unrelated.id,
+                unrelated.revision,
+                CompleteItem {
+                    occurrence_id: unrelated.occurrence.id,
+                },
+                &actor,
+                "retained-completion",
+            )
+            .await
+            .unwrap();
+        let archived = store
+            .archive(&completed.id, completed.revision, true, Management::Owner)
+            .await
+            .unwrap();
+        let original_reorder = store.get_reorder(reordered.id).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER fail_example_deletion BEFORE DELETE ON completions WHEN OLD.item_id='example-deleted' BEGIN SELECT RAISE(ABORT,'example deletion failure'); END")
+            .execute(store.pool()).await.unwrap();
+        assert!(matches!(
+            store
+                .delete(&archived.id, archived.revision, Management::Owner)
+                .await,
+            Err(Error::Database(_))
+        ));
+        assert_eq!(
+            serde_json::to_vec(&store.get(&archived.id).await.unwrap()).unwrap(),
+            serde_json::to_vec(&archived).unwrap()
+        );
+        assert_eq!(
+            store
+                .events(&archived.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM deleted_items")
+                .fetch_one(store.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .create(input.clone(), &actor, "delete-create", Management::Owner)
+                .await
+                .unwrap()
+                .revision,
+            created.revision
+        );
+        sqlx::query("DROP TRIGGER fail_example_deletion")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        store
+            .delete(&archived.id, archived.revision, Management::Owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store.get(&archived.id).await,
+            Err(Error::NotFound)
+        ));
+        assert!(matches!(
+            store.events(&archived.id, None, 100).await,
+            Err(Error::NotFound)
+        ));
+        assert_eq!(store.summary().await.unwrap().completed, 1);
+        assert_eq!(
+            serde_json::to_vec(&store.get(&unrelated.id).await.unwrap()).unwrap(),
+            serde_json::to_vec(&unrelated).unwrap()
+        );
+        assert_eq!(
+            store
+                .events(&unrelated.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(
+            store.get_reorder(reordered.id).await.unwrap(),
+            original_reorder
+        );
+        assert_eq!(
+            store
+                .reorder(
+                    &completed.id,
+                    completed.revision,
+                    ReorderItem::default(),
+                    &actor,
+                    "delete-reorder"
+                )
+                .await
+                .unwrap(),
+            reordered
+        );
+        assert!(matches!(
+            store
+                .create(input.clone(), &actor, "delete-create", Management::Owner)
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert!(matches!(
+            store
+                .complete(
+                    &checked.id,
+                    checked.revision,
+                    completion_request,
+                    &actor,
+                    "delete-completion"
+                )
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert!(matches!(
+            store
+                .set_checklist_step(
+                    &created.id,
+                    step_id,
+                    created.revision,
+                    step_request,
+                    &actor,
+                    "delete-checklist"
+                )
+                .await,
+            Err(Error::Deleted)
+        ));
+        let invalidated: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT response,invalidated FROM idempotency WHERE key IN ('delete-create','delete-checklist','delete-completion')")
+            .fetch_all(store.pool()).await.unwrap();
+        assert_eq!(invalidated.len(), 3);
+        assert!(
+            invalidated
+                .iter()
+                .all(|(response, invalidated)| response == "null" && *invalidated)
+        );
+        assert!(matches!(
+            store
+                .create(
+                    unrelated_input.clone(),
+                    &actor,
+                    "delete-create",
+                    Management::Owner
+                )
+                .await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            store
+                .create(input.clone(), &actor, "new-create", Management::Owner)
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert!(matches!(
+            store
+                .import(
+                    ImportCatalog {
+                        items: vec![deletion_input("example-rolled-back"), input.clone()]
+                    },
+                    Management::Owner
+                )
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert!(matches!(
+            store.get(&deletion_input("example-rolled-back").id).await,
+            Err(Error::NotFound)
+        ));
+        let retained_replay = store
+            .create(
+                unrelated_input,
+                &actor,
+                "retained-create",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retained_replay.revision, 1);
+        assert_eq!(
+            store
+                .events(&retained_replay.id, None, 100)
+                .await
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        store.close().await.unwrap();
+        let reopened = Store::open(&path).await.unwrap();
+        reopened
+            .delete(&archived.id, archived.revision, Management::Owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            reopened
+                .delete(&archived.id, archived.revision - 1, Management::Owner)
+                .await,
+            Err(Error::Precondition)
+        ));
+        assert!(matches!(
+            reopened
+                .create(input, &actor, "delete-create", Management::Owner)
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert_eq!(
+            reopened.get_reorder(reordered.id).await.unwrap(),
+            original_reorder
+        );
+        assert!(
+            sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(reopened.pool())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_preserves_migration_acknowledgements_but_blocks_reimport() {
+        use crate::models::{ImportedCompletion, MigrationItem, SourceRef};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("source-delete.sqlite3"))
+            .await
+            .unwrap();
+        let actor = deletion_actor();
+        let source_item = |id: &str| MigrationItem {
+            source: SourceRef {
+                system: "example".into(),
+                collection: "example-list".into(),
+                id: id.into(),
+            },
+            item: deletion_input(id),
+            status: ItemStatus::NeedsAction,
+            archived: false,
+            history: vec![ImportedCompletion {
+                completed_at: Some(Utc::now()),
+                ..Default::default()
+            }],
+        };
+        let migration = Migration {
+            items: vec![
+                source_item("example-deleted-source"),
+                source_item("example-retained-source"),
+            ],
+        };
+        let original = store
+            .migrate(
+                migration.clone(),
+                &actor,
+                "source-migration",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        let source = store.get(&migration.items[0].item.id).await.unwrap();
+        let archived = store
+            .archive(&source.id, source.revision, true, Management::Owner)
+            .await
+            .unwrap();
+        store
+            .delete(&archived.id, archived.revision, Management::Owner)
+            .await
+            .unwrap();
+        let replay = store
+            .migrate(
+                migration.clone(),
+                &actor,
+                "source-migration",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay, original);
+        assert!(matches!(
+            store.get(&archived.id).await,
+            Err(Error::NotFound)
+        ));
+        let preview = store.preview_migration(migration.clone()).await.unwrap();
+        assert!(!preview.applicable);
+        assert_eq!(preview.items[0].action, MigrationAction::Conflict);
+        assert!(
+            preview.items[0]
+                .conflicts
+                .iter()
+                .any(|conflict| conflict == "source item was permanently deleted")
+        );
+        assert_eq!(preview.items[1].action, MigrationAction::Unchanged);
+        assert!(matches!(
+            store
+                .migrate(
+                    migration.clone(),
+                    &actor,
+                    "source-new-attempt",
+                    Management::Owner
+                )
+                .await,
+            Err(Error::Conflict(_))
+        ));
+        let mut changed_target = migration.items[0].clone();
+        changed_target.item.id = "example-source-new-target".to_owned().try_into().unwrap();
+        let report = store
+            .preview_migration(Migration {
+                items: vec![changed_target],
+            })
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].action, MigrationAction::Conflict);
+        assert!(
+            report.items[0]
+                .conflicts
+                .iter()
+                .any(|conflict| conflict == "source item was permanently deleted")
+        );
+        let mut changed_source = migration.items[0].clone();
+        changed_source.source.id = "example-new-source".into();
+        let report = store
+            .preview_migration(Migration {
+                items: vec![changed_source],
+            })
+            .await
+            .unwrap();
+        assert_eq!(report.items[0].action, MigrationAction::Conflict);
+        assert!(
+            report.items[0]
+                .conflicts
+                .iter()
+                .any(|conflict| conflict == "target item id was permanently deleted")
+        );
+        let mut mixed = migration;
+        mixed
+            .items
+            .insert(0, source_item("example-unrelated-new-source"));
+        assert!(matches!(
+            store
+                .migrate(mixed, &actor, "source-mixed-attempt", Management::Owner)
+                .await,
+            Err(Error::Conflict(_))
+        ));
+        assert!(matches!(
+            store
+                .get(&deletion_input("example-unrelated-new-source").id)
+                .await,
+            Err(Error::NotFound)
+        ));
+        assert_eq!(store.summary().await.unwrap().completed, 1);
+        let mappings: i64 = sqlx::query_scalar("SELECT count(*) FROM migration_sources")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(mappings, 2);
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_is_revision_checked_owner_protected_and_atomic_with_restore() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("racing-delete.sqlite3"))
+            .await
+            .unwrap();
+        let actor = deletion_actor();
+        let mut input = deletion_input("example-instruction-delete");
+        input.due = None;
+        input.definition.schedule = Schedule::Instruction;
+        input.definition.checklist.clear();
+        input.definition.reorder_url = None;
+        let item = store
+            .create(input, &actor, "instruction-delete", Management::Owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .delete(&item.id, item.revision, Management::Owner)
+                .await,
+            Err(Error::Conflict(_))
+        ));
+        let item = store
+            .archive(&item.id, item.revision, true, Management::Owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .delete(&item.id, item.revision, Management::Administrator)
+                .await,
+            Err(Error::Forbidden)
+        ));
+        assert!(matches!(
+            store
+                .delete(&item.id, item.revision - 1, Management::Owner)
+                .await,
+            Err(Error::Precondition)
+        ));
+        let (first, second) = tokio::join!(
+            store.delete(&item.id, item.revision, Management::Owner),
+            store.delete(&item.id, item.revision, Management::Owner)
+        );
+        first.unwrap();
+        second.unwrap();
+        assert!(matches!(
+            store
+                .delete(&item.id, item.revision, Management::Administrator)
+                .await,
+            Err(Error::Forbidden)
+        ));
+        let created = store
+            .create(
+                deletion_input("example-restore-delete"),
+                &actor,
+                "restore-delete",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        let item = store
+            .archive(&created.id, created.revision, true, Management::Owner)
+            .await
+            .unwrap();
+        let (removed, restored) = tokio::join!(
+            store.delete(&item.id, item.revision, Management::Owner),
+            store.archive(&item.id, item.revision, false, Management::Owner)
+        );
+        match (removed, restored) {
+            (Ok(()), Err(Error::NotFound)) => {
+                assert!(matches!(store.get(&item.id).await, Err(Error::NotFound)));
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM deleted_items WHERE id=?")
+                        .bind(item.id.as_ref())
+                        .fetch_one(store.pool())
+                        .await
+                        .unwrap(),
+                    1
+                );
+            }
+            (Err(Error::Precondition), Ok(restored)) => {
+                assert!(!restored.archived);
+                assert_eq!(
+                    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM deleted_items WHERE id=?")
+                        .bind(item.id.as_ref())
+                        .fetch_one(store.pool())
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            _ => panic!("delete and restore must serialize on the captured archived revision"),
+        }
+        store.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn permanent_delete_upgrades_legacy_receipts_and_uses_indexed_queries() {
+        use crate::models::{ImportedCompletion, MigrationItem, SourceRef};
+        let directory = tempfile::tempdir().unwrap();
+        let migration_directory = directory.path().join("old-migrations");
+        std::fs::create_dir(&migration_directory).unwrap();
+        for (name, sql) in [
+            (
+                "0001_maintenance.sql",
+                include_str!("../migrations/0001_maintenance.sql"),
+            ),
+            (
+                "0002_reorders.sql",
+                include_str!("../migrations/0002_reorders.sql"),
+            ),
+            (
+                "0003_migration_fidelity.sql",
+                include_str!("../migrations/0003_migration_fidelity.sql"),
+            ),
+        ] {
+            std::fs::write(migration_directory.join(name), sql).unwrap();
+        }
+        let path = directory.path().join("legacy-delete.sqlite3");
+        let legacy = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(migration_directory.as_path())
+            .await
+            .unwrap()
+            .run(&legacy)
+            .await
+            .unwrap();
+        let actor = deletion_actor();
+        let input = deletion_input("example-legacy-deleted");
+        let mut transaction = legacy.begin().await.unwrap();
+        sqlx::query(ITEM_INSERT)
+            .bind(input.id.as_ref())
+            .bind(serde_json::to_string(&input.definition).unwrap())
+            .bind(Uuid::now_v7().to_string())
+            .bind(input.due.map(|due| due.to_string()))
+            .bind(serde_json::to_string(&input.definition.checklist_state(&[])).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let item = get_item(&mut transaction, &input.id).await.unwrap();
+        let completion = CompleteItem {
+            occurrence_id: item.occurrence.id,
+        };
+        let event_id = Uuid::now_v7();
+        let now: String = sqlx::query_scalar(DATABASE_NOW)
+            .fetch_one(&mut *transaction)
+            .await
+            .unwrap();
+        let sequence = sqlx::query(COMPLETION_INSERT)
+            .bind(event_id.to_string())
+            .bind(item.id.as_ref())
+            .bind(item.occurrence.id.to_string())
+            .bind(now)
+            .bind(serde_json::to_string(&actor).unwrap())
+            .bind(item.occurrence.due.map(|due| due.to_string()))
+            .bind("2031-04-05")
+            .bind(serde_json::to_string(&item.occurrence.checklist).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap()
+            .last_insert_rowid();
+        sqlx::query(OCCURRENCE_ADVANCE)
+            .bind("2031-04-05")
+            .bind(Uuid::now_v7().to_string())
+            .bind(2_i64)
+            .bind(sequence)
+            .bind(serde_json::to_string(&item.occurrence.checklist).unwrap())
+            .bind("needs_action")
+            .bind(item.id.as_ref())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let completed = get_item(&mut transaction, &input.id).await.unwrap();
+        save_replay(
+            &mut transaction,
+            &actor,
+            "legacy-create",
+            &create_fingerprint(&input).unwrap(),
+            &item,
+        )
+        .await
+        .unwrap();
+        save_replay(
+            &mut transaction,
+            &actor,
+            "legacy-complete",
+            &fingerprint("complete", &(&item.id, item.revision, &completion)).unwrap(),
+            &completed,
+        )
+        .await
+        .unwrap();
+        let legacy_reorder = ReorderReceipt {
+            id: Uuid::now_v7(),
+            item_id: item.id.clone(),
+            item_revision: completed.revision,
+            requested_at: Utc::now(),
+            actor: actor.clone(),
+            item: ReorderContent {
+                name: input.definition.name.clone(),
+                summary: input.definition.summary.clone(),
+                description: input.definition.description.clone(),
+                specs: input.definition.specs.clone(),
+                resources: input.definition.resources.clone(),
+                reorder_url: input.definition.reorder_url.clone().unwrap(),
+            },
+        };
+        sqlx::query(REORDER_INSERT)
+            .bind(legacy_reorder.id.to_string())
+            .bind(serde_json::to_string(&legacy_reorder).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        save_replay(
+            &mut transaction,
+            &actor,
+            "legacy-reorder",
+            &fingerprint(
+                "reorder",
+                &(&item.id, completed.revision, ReorderItem::default()),
+            )
+            .unwrap(),
+            &legacy_reorder,
+        )
+        .await
+        .unwrap();
+        let legacy_migration = Migration {
+            items: vec![MigrationItem {
+                source: SourceRef {
+                    system: "example".into(),
+                    collection: "legacy".into(),
+                    id: "example-legacy-source".into(),
+                },
+                item: deletion_input("example-legacy-migrated"),
+                status: ItemStatus::NeedsAction,
+                archived: true,
+                history: vec![],
+            }],
+        };
+        let migrated = &legacy_migration.items[0];
+        let source_key = serde_json::to_string(&migrated.source).unwrap();
+        sqlx::query(ITEM_INSERT)
+            .bind(migrated.item.id.as_ref())
+            .bind(serde_json::to_string(&migrated.item.definition).unwrap())
+            .bind(Uuid::now_v7().to_string())
+            .bind(migrated.item.due.map(|due| due.to_string()))
+            .bind(serde_json::to_string(&migrated.item.definition.checklist_state(&[])).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query(MIGRATION_ITEM_UPDATE)
+            .bind("needs_action")
+            .bind(true)
+            .bind(&source_key)
+            .bind(&source_key)
+            .bind(None::<i64>)
+            .bind(migrated.item.id.as_ref())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query(MIGRATION_SOURCE_INSERT)
+            .bind(&source_key)
+            .bind(migrated.item.id.as_ref())
+            .bind(fingerprint_item(migrated).unwrap())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let legacy_report = MigrationReport {
+            applicable: true,
+            items: vec![MigrationMapping {
+                source: migrated.source.clone(),
+                target_id: migrated.item.id.clone(),
+                action: MigrationAction::Created,
+                conflicts: vec![],
+                history_events: 0,
+            }],
+        };
+        save_replay(
+            &mut transaction,
+            &actor,
+            "legacy-migration",
+            &fingerprint("migrate", &legacy_migration).unwrap(),
+            &legacy_report,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        let old_get = "SELECT fingerprint,response FROM idempotency WHERE actor=? AND key=?";
+        let mut old_plan = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+        old_plan.push(old_get);
+        let before = old_plan
+            .build()
+            .bind(actor.key())
+            .bind("legacy-complete")
+            .fetch_all(&legacy)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>();
+        assert!(before.iter().all(|line| line.starts_with("SEARCH")));
+        let mut old_history_plan = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+        old_history_plan.push(ITEM_COMPLETIONS_DELETE);
+        let before_history = old_history_plan
+            .build()
+            .bind(item.id.as_ref())
+            .fetch_all(&legacy)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>();
+        assert!(before_history.iter().any(|line| line == "SCAN items"));
+        legacy.close().await;
+        let store = Store::open(&path).await.unwrap();
+        assert_eq!(
+            serde_json::to_vec(
+                &store
+                    .create(input.clone(), &actor, "legacy-create", Management::Owner)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_vec(&item).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(
+                &store
+                    .complete(
+                        &item.id,
+                        item.revision,
+                        completion.clone(),
+                        &actor,
+                        "legacy-complete"
+                    )
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_vec(&completed).unwrap()
+        );
+        assert_eq!(
+            store
+                .reorder(
+                    &item.id,
+                    completed.revision,
+                    ReorderItem::default(),
+                    &actor,
+                    "legacy-reorder"
+                )
+                .await
+                .unwrap(),
+            legacy_reorder
+        );
+        assert_eq!(
+            store
+                .migrate(
+                    legacy_migration.clone(),
+                    &actor,
+                    "legacy-migration",
+                    Management::Owner
+                )
+                .await
+                .unwrap(),
+            legacy_report
+        );
+        let migrated = store.get(&legacy_migration.items[0].item.id).await.unwrap();
+        store
+            .delete(&migrated.id, migrated.revision, Management::Owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .migrate(
+                    legacy_migration.clone(),
+                    &actor,
+                    "legacy-migration",
+                    Management::Owner
+                )
+                .await
+                .unwrap(),
+            legacy_report
+        );
+        assert!(
+            !store
+                .preview_migration(legacy_migration)
+                .await
+                .unwrap()
+                .applicable
+        );
+        for index in 0..400 {
+            let mut input = deletion_input(&format!("example-plan-deleted-{index:03}"));
+            input.definition.schedule = Schedule::Standing;
+            input.due = None;
+            let item = store
+                .create(
+                    input,
+                    &actor,
+                    &format!("plan-create-{index}"),
+                    Management::Owner,
+                )
+                .await
+                .unwrap();
+            if index % 4 == 0 {
+                let archived = store
+                    .archive(&item.id, item.revision, true, Management::Owner)
+                    .await
+                    .unwrap();
+                store
+                    .delete(&archived.id, archived.revision, Management::Owner)
+                    .await
+                    .unwrap();
+            } else {
+                store
+                    .complete(
+                        &item.id,
+                        item.revision,
+                        CompleteItem {
+                            occurrence_id: item.occurrence.id,
+                        },
+                        &actor,
+                        &format!("plan-complete-{index}"),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let archived = store
+            .archive(&completed.id, completed.revision, true, Management::Owner)
+            .await
+            .unwrap();
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+        let mut evidence = vec![
+            ("legacy receipt lookup", before),
+            ("legacy history deletion", before_history),
+        ];
+        enum Parameter {
+            Text(String),
+            Integer(i64),
+        }
+        use Parameter::{Integer, Text};
+        let queries = [
+            (
+                "current receipt lookup",
+                IDEMPOTENCY_GET,
+                vec![Text(actor.key()), Text("legacy-complete".into())],
+            ),
+            (
+                "deleted identity lookup",
+                DELETED_ITEM_GET,
+                vec![Text(item.id.as_ref().into())],
+            ),
+            (
+                "deleted identity insert",
+                DELETED_ITEM_INSERT,
+                vec![
+                    Text(item.id.as_ref().into()),
+                    Integer(archived.revision),
+                    Integer(0),
+                ],
+            ),
+            (
+                "item receipt invalidation",
+                ITEM_RECEIPTS_INVALIDATE,
+                vec![Text(item.id.as_ref().into())],
+            ),
+            (
+                "item completion unlink",
+                ITEM_UNLINK_COMPLETION,
+                vec![Text(item.id.as_ref().into())],
+            ),
+            (
+                "item history deletion",
+                ITEM_COMPLETIONS_DELETE,
+                vec![Text(item.id.as_ref().into())],
+            ),
+            (
+                "item deletion",
+                ITEM_DELETE,
+                vec![Text(item.id.as_ref().into())],
+            ),
+            (
+                "migration deleted targets",
+                MIGRATION_DELETED_TARGETS,
+                vec![Text(
+                    serde_json::to_string(&[item.id.as_ref(), "example-plan-deleted-000"]).unwrap(),
+                )],
+            ),
+        ];
+        for (name, query, parameters) in queries {
+            let mut details = Vec::new();
+            for prefix in ["EXPLAIN QUERY PLAN ", "EXPLAIN "] {
+                let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+                builder.push(query);
+                let mut statement = builder.build();
+                for parameter in &parameters {
+                    statement = match parameter {
+                        Text(value) => statement.bind(value),
+                        Integer(value) => statement.bind(value),
+                    };
+                }
+                let rows = statement.fetch_all(store.pool()).await.unwrap();
+                assert!(!rows.is_empty() || name == "deleted identity insert");
+                if prefix == "EXPLAIN QUERY PLAN " {
+                    details = rows
+                        .iter()
+                        .map(|row| row.get::<String, _>("detail"))
+                        .collect();
+                    assert!(
+                        !details.iter().any(|line| line.contains("SCAN items")
+                            || line.contains("SCAN completions")
+                            || line.contains("SCAN idempotency")
+                            || line.contains("SCAN deleted_items")
+                            || line.contains("TEMP B-TREE")),
+                        "{name}: {details:?}"
+                    );
+                    if name == "current receipt lookup" {
+                        assert_eq!(details, evidence[0].1);
+                    }
+                    if name == "item receipt invalidation" {
+                        assert!(
+                            details
+                                .iter()
+                                .any(|line| line.contains("idempotency_item_snapshot")),
+                            "{details:?}"
+                        );
+                    }
+                    if name == "item history deletion" {
+                        assert!(
+                            details
+                                .iter()
+                                .any(|line| line.contains("completions_item_sequence")),
+                            "{details:?}"
+                        );
+                        assert!(
+                            details
+                                .iter()
+                                .any(|line| line.contains("items_last_completion")),
+                            "{details:?}"
+                        );
+                    }
+                } else {
+                    details.push(format!("{} SQLite VM instructions", rows.len()));
+                }
+            }
+            evidence.push((name, details));
+        }
+        eprintln!(
+            "permanent deletion plans after seeding 402 items, 301 completions, 704 operation receipts: {evidence:?}"
+        );
+        store
+            .delete(&archived.id, archived.revision, Management::Owner)
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .create(input, &actor, "legacy-create", Management::Owner)
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert!(matches!(
+            store
+                .complete(
+                    &item.id,
+                    item.revision,
+                    completion,
+                    &actor,
+                    "legacy-complete"
+                )
+                .await,
+            Err(Error::Deleted)
+        ));
+        assert_eq!(
+            store
+                .reorder(
+                    &item.id,
+                    completed.revision,
+                    ReorderItem::default(),
+                    &actor,
+                    "legacy-reorder"
+                )
+                .await
+                .unwrap(),
+            legacy_reorder
+        );
+        let migration = Migration {
+            items: vec![MigrationItem {
+                source: SourceRef {
+                    system: "example".into(),
+                    collection: "legacy".into(),
+                    id: "example-new".into(),
+                },
+                item: deletion_input("example-unrelated-migration"),
+                status: ItemStatus::NeedsAction,
+                archived: false,
+                history: vec![ImportedCompletion::default()],
+            }],
+        };
+        let accepted = store
+            .migrate(
+                migration.clone(),
+                &actor,
+                "unrelated-migration",
+                Management::Owner,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .migrate(migration, &actor, "unrelated-migration", Management::Owner)
+                .await
+                .unwrap(),
+            accepted
+        );
+        store.close().await.unwrap();
     }
 }

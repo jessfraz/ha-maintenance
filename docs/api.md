@@ -19,6 +19,7 @@ a fresh copy with `just openapi`.
 | Fulfill or dismiss a reorder | `PUT /v1/reorders/{id}/resolution` |
 | Read completion history | `GET /v1/items/{id}/events` |
 | Archive or restore an item | `PUT /v1/items/{id}/archive`, `DELETE /v1/items/{id}/archive` |
+| Permanently delete an archived item and its history | `DELETE /v1/items/{id}` |
 | Counts and authenticated service status | `GET /v1/summary`, `GET /v1/system` |
 | HA device/entity catalog (administrators) | `GET /v1/home-assistant/registry` |
 
@@ -43,9 +44,9 @@ return **400**, including catalog imports and edits that would leave a recurring
 task undated. One-off and standing tasks retain an omitted or null due date.
 
 Standing instructions have no due date, checklist, reorder, or completion.
-Creating, editing, archiving, restoring, or changing their type requires the
-owner. A standalone owner credential has the same authority as the Home
-Assistant owner.
+Creating, editing, archiving, restoring, permanently deleting, or changing their
+type requires the owner. A standalone owner credential has the same authority
+as the Home Assistant owner.
 
 Due dates range from `0001-01-01` through `9999-12-30`, leaving a representable
 following day for each calendar event's exclusive end.
@@ -60,6 +61,29 @@ fit within 200 UTF-8 bytes. An optional description fits within 16,000 UTF-8
 bytes and must be nonblank when supplied. A checklist defaults to empty and
 supports up to 100 steps, each with a unique UUID that remains stable when
 editing its text.
+
+## Permanent deletion
+
+Archive an item before calling `DELETE /v1/items/{id}`. This requires
+administrator access and the archived item's quoted revision in `If-Match`.
+Active items return **409**; missing, malformed, and stale revisions return
+**428**, **400**, and **412**. Standing instructions require owner access.
+
+A successful **204** removes the item and its entire completion history in one
+transaction. Repeating the delete with the same revision returns **204**, so a
+lost response can be retried safely. A different revision returns **412**;
+an unknown ID returns **404**. Reading a deleted item or its history returns
+**404**. Reorder requests and their receipts remain available.
+
+Deleted IDs stay reserved. Creating or importing that ID returns **410**.
+Saved creation, checklist, and completion responses for the deleted item have
+their payloads removed; exact retries return **410** and changed requests
+using the same key still return **409**. Other items and receipts are unchanged.
+
+Migration source mappings remain reserved too. A new migration preview reports
+a conflict for a deleted target or source, and applying it returns **409**.
+Replaying an accepted migration key returns its original mapping report as a
+historical acknowledgement; it does not recreate the deleted item.
 
 ## Home Assistant links
 

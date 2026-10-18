@@ -32,6 +32,8 @@ const completionRequests = new Map();
 const completionBusy = new Set();
 const checklistRequests = new Map();
 const checklistBusy = new Set();
+const deletionRequests = new Map();
+const deletionBusy = new Set();
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -147,11 +149,13 @@ function checklistProgress(steps) {
 }
 
 function itemBusy(item) {
-  return completionBusy.has(item.id) || checklistBusy.has(item.id);
+  return completionBusy.has(item.id) || checklistBusy.has(item.id) ||
+    deletionBusy.has(item.id);
 }
 
 function itemPending(item) {
-  return completionRequests.has(item.id) || checklistRequests.has(item.id);
+  return completionRequests.has(item.id) || checklistRequests.has(item.id) ||
+    deletionRequests.has(item.id);
 }
 
 function dueInfo(item) {
@@ -428,7 +432,7 @@ function renderSummary(summary) {
     const stat = element(
       "button",
       undefined,
-      `summary-stat${key === "overdue" && summary[key] > 0 ? " attention" : ""}`,
+      `summary-stat summary-stat-${key}`,
     );
     stat.type = "button";
     stat.dataset.summary = key;
@@ -908,6 +912,18 @@ function renderDetail() {
     );
     archive.disabled = itemBusy(item) || itemPending(item);
     actions.append(archive);
+    if (item.archived) {
+      const remove = action(
+        deletionRequests.has(item.id)
+          ? "Retry permanent deletion"
+          : "Delete permanently",
+        () => deleteItem(item),
+        "quiet delete-action",
+      );
+      remove.disabled = itemBusy(item) || completionRequests.has(item.id) ||
+        checklistRequests.has(item.id);
+      actions.append(remove);
+    }
   }
 }
 
@@ -1182,6 +1198,57 @@ async function updateChecklist(item, stepId, completed) {
         true,
       ),
     );
+}
+
+async function deleteItem(item) {
+  if (
+    !item.archived || itemBusy(item) || completionRequests.has(item.id) ||
+    checklistRequests.has(item.id)
+  ) return;
+  let revision = deletionRequests.get(item.id);
+  if (revision === undefined) {
+    if (!window.confirm(`Permanently delete “${item.summary}” and all its completion history? This cannot be undone. Reorder requests will be kept.`)) return;
+    revision = item.revision;
+    deletionRequests.set(item.id, revision);
+  }
+  deletionBusy.add(item.id);
+  byId("detail-error").textContent = "";
+  renderDetail();
+  try {
+    await api(`v1/items/${encodeURIComponent(item.id)}`, {
+      method: "DELETE",
+      headers: { "If-Match": `"${revision}"` },
+    });
+  } catch (error) {
+    let message;
+    if (error instanceof ApiError && error.status < 500) {
+      deletionRequests.delete(item.id);
+      if ([409, 412].includes(error.status)) {
+        message = "This item changed. Review it before deleting permanently.";
+        if (selected?.id === item.id) {
+          await openDetail(item.id, false).catch((refreshError) => {
+            message += ` ${errorMessage(refreshError)}`;
+          });
+        }
+      } else message = errorMessage(error);
+    } else {
+      message = `${errorMessage(error)} Retry permanent deletion to confirm the original request safely.`;
+    }
+    if (selected?.id === item.id) byId("detail-error").textContent = message;
+    else notice(message, true);
+    return;
+  } finally {
+    deletionBusy.delete(item.id);
+    if (selected?.id === item.id) renderDetail();
+  }
+  deletionRequests.delete(item.id);
+  if (selected?.id === item.id) closeDetail();
+  items = items.filter((value) => value.id !== item.id);
+  renderList();
+  notice("Item and completion history permanently deleted.");
+  await load().catch((error) =>
+    notice(`Item deleted, but the queue could not be refreshed. ${errorMessage(error)}`, true),
+  );
 }
 
 async function archiveItem(item) {

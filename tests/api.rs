@@ -144,6 +144,320 @@ async fn set_step(f: &Fixture, item: &Item, step_id: Uuid, completed: bool, key:
         .unwrap()
 }
 
+async fn delete_item(f: &Fixture, item: &Item) -> Response {
+    f.client
+        .delete(format!("{}/v1/items/{}", f.origin, item.id.as_ref()))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", item.revision))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn permanent_delete_requires_authority_archive_and_current_revision() {
+    let f = Fixture::new().await;
+    let item = f.create("example-delete-authority").await;
+    let url = format!("{}/v1/items/{}", f.origin, item.id.as_ref());
+    assert_eq!(
+        f.client.delete(&url).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for (actor, admin) in [("ha:example-user", false), ("ha:automation", true)] {
+        let actor_header = if actor == "ha:automation" {
+            "X-Maintenance-System-Actor"
+        } else {
+            "X-Maintenance-Actor-Id"
+        };
+        assert_eq!(
+            f.client
+                .delete(&url)
+                .bearer_auth(INTEGRATION)
+                .header(actor_header, actor)
+                .header("X-Maintenance-Admin", admin.to_string())
+                .header("If-Match", "\"1\"")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        f.client
+            .delete(&url)
+            .bearer_auth(OWNER)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    for value in ["1", "\"0\"", "W/\"1\"", "\"1\",\"2\""] {
+        assert_eq!(
+            f.client
+                .delete(&url)
+                .bearer_auth(OWNER)
+                .header("If-Match", value)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(delete_item(&f, &item).await.status(), StatusCode::CONFLICT);
+    let archived = f
+        .store
+        .archive(&item.id, item.revision, true, Management::Owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_item(&f, &item).await.status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    let response = f
+        .client
+        .delete(&url)
+        .bearer_auth(INTEGRATION)
+        .header("X-Maintenance-Actor-Id", "ha:example-admin")
+        .header("X-Maintenance-Admin", "true")
+        .header("If-Match", format!("\"{}\"", archived.revision))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(response.bytes().await.unwrap().is_empty());
+    assert_eq!(
+        delete_item(&f, &archived).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        delete_item(&f, &item).await.status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+
+    let protected = f
+        .store
+        .create(
+            instruction_input("example-delete-instruction"),
+            &Actor::System {
+                id: home_maintenance::models::SystemActor::Owner,
+                name: "Owner credential".into(),
+            },
+            "protected-create",
+            Management::Owner,
+        )
+        .await
+        .unwrap();
+    let protected = f
+        .store
+        .archive(&protected.id, protected.revision, true, Management::Owner)
+        .await
+        .unwrap();
+    let protected_url = format!("{}/v1/items/{}", f.origin, protected.id.as_ref());
+    for deleted in [false, true] {
+        assert_eq!(
+            f.client
+                .delete(&protected_url)
+                .bearer_auth(INTEGRATION)
+                .header("X-Maintenance-Actor-Id", "ha:example-admin")
+                .header("X-Maintenance-Admin", "true")
+                .header("If-Match", format!("\"{}\"", protected.revision))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        if !deleted {
+            assert_eq!(
+                delete_item(&f, &protected).await.status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn permanent_delete_removes_only_selected_history_and_invalidates_item_retries() {
+    let f = Fixture::new().await;
+    let created = f.create("example-delete-history").await;
+    let checked: Item = set_step(&f, &created, Uuid::from_u128(1), true, "delete-check")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let completed: Item = complete(&f, &checked, "delete-complete")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let unrelated = f.create("example-keep-history").await;
+    let unrelated: Item = complete(&f, &unrelated, "keep-complete")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kept_history = f.store.events(&unrelated.id, None, 100).await.unwrap();
+    let archived = f
+        .store
+        .archive(&completed.id, completed.revision, true, Management::Owner)
+        .await
+        .unwrap();
+    assert_eq!(f.store.summary().await.unwrap().completed, 2);
+    assert_eq!(
+        delete_item(&f, &archived).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    for suffix in ["", "/events"] {
+        assert_eq!(
+            f.client
+                .get(format!(
+                    "{}/v1/items/{}{suffix}",
+                    f.origin,
+                    archived.id.as_ref()
+                ))
+                .bearer_auth(OWNER)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(f.store.summary().await.unwrap().completed, 1);
+    assert_eq!(
+        serde_json::to_vec(&f.get(unrelated.id.as_ref()).await).unwrap(),
+        serde_json::to_vec(&unrelated).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&f.store.events(&unrelated.id, None, 100).await.unwrap()).unwrap(),
+        serde_json::to_vec(&kept_history).unwrap()
+    );
+    assert_eq!(
+        set_step(&f, &created, Uuid::from_u128(1), true, "delete-check")
+            .await
+            .status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        complete(&f, &checked, "delete-complete").await.status(),
+        StatusCode::GONE
+    );
+    let create = |key: &str| {
+        f.client
+            .post(format!("{}/v1/items", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", key)
+            .json(&input(created.id.as_ref()))
+    };
+    assert_eq!(
+        create(created.id.as_ref()).send().await.unwrap().status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        create("new-create-key").send().await.unwrap().status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        set_step(&f, &created, Uuid::from_u128(1), false, "delete-check")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        f.client
+            .post(format!("{}/v1/imports", f.origin))
+            .bearer_auth(OWNER)
+            .json(&ImportCatalog {
+                items: vec![input("example-import-rollback"), input(created.id.as_ref())]
+            })
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::GONE
+    );
+    assert!(
+        f.store
+            .get(&ItemId::try_from("example-import-rollback".to_owned()).unwrap())
+            .await
+            .is_err()
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn permanent_delete_prevents_source_resurrection_but_preserves_migration_receipts() {
+    use home_maintenance::models::{
+        ImportedCompletion, Migration, MigrationAction, MigrationReport,
+    };
+    let f = Fixture::new().await;
+    let mut target = migration_item("example-delete-migration");
+    target.history.push(ImportedCompletion {
+        completed_at: Some(chrono::Utc::now()),
+        ..Default::default()
+    });
+    let migration = Migration {
+        items: vec![target, migration_item("example-keep-migration")],
+    };
+    let response = migration_request(&f, &migration, false, "delete-migration").await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let receipt: MigrationReport = response.json().await.unwrap();
+    let item = f.get("example-delete-migration").await;
+    let archived = f
+        .store
+        .archive(&item.id, item.revision, true, Management::Owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_item(&f, &archived).await.status(),
+        StatusCode::NO_CONTENT
+    );
+    let replay: MigrationReport = migration_request(&f, &migration, false, "delete-migration")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, receipt);
+    for change_target in [false, true] {
+        let mut retry = migration.clone();
+        if change_target {
+            retry.items[0].item.id =
+                ItemId::try_from("example-reassigned-target".to_owned()).unwrap();
+        }
+        let report: MigrationReport = migration_request(&f, &retry, true, "unused")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(!report.applicable);
+        assert_eq!(report.items[0].action, MigrationAction::Conflict);
+        assert!(
+            report.items[0]
+                .conflicts
+                .iter()
+                .any(|message| message.contains("permanently deleted"))
+        );
+        assert_eq!(report.items[1].action, MigrationAction::Unchanged);
+        assert_eq!(
+            migration_request(&f, &retry, false, "new-migration-key")
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+    assert_eq!(f.store.summary().await.unwrap().completed, 0);
+    assert!(f.store.get(&item.id).await.is_err());
+    assert_eq!(
+        f.get("example-keep-migration").await.id.as_ref(),
+        "example-keep-migration"
+    );
+    f.finish().await;
+}
+
 #[tokio::test]
 async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
     let f = Fixture::new().await;
@@ -1228,7 +1542,8 @@ async fn reorder_receipts_survive_source_edits_archive_deletion_and_resolution()
         .await
         .unwrap();
     assert_eq!(replay, receipt);
-    f.store
+    let archived = f
+        .store
         .archive(&item.id, changed.revision, true, Management::Owner)
         .await
         .unwrap();
@@ -1255,11 +1570,10 @@ async fn reorder_receipts_survive_source_edits_archive_deletion_and_resolution()
         .await
         .unwrap();
     assert_eq!(resolved.status, ReorderStatus::Dismissed);
-    sqlx::query("DELETE FROM items WHERE id=?")
-        .bind(item.id.as_ref())
-        .execute(f.store.pool())
-        .await
-        .unwrap();
+    assert_eq!(
+        delete_item(&f, &archived).await.status(),
+        StatusCode::NO_CONTENT
+    );
     let response = reorder(&f, &item, "physical-press").await;
     assert_eq!(response.status(), StatusCode::CREATED);
     assert_eq!(response.json::<ReorderReceipt>().await.unwrap(), receipt);

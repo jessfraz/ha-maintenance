@@ -1399,3 +1399,62 @@ async def test_native_card_uses_stable_task_ids_and_refreshes_real_status(
     assert completed["total"] == 1
     assert completed["items"][0]["id"] == original.id
     assert completed["items"][0]["status"] == "completed"
+
+
+async def test_permanent_deletion_through_ha_preserves_revision_and_refreshes_entities(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    rust_backend: RustBackend,
+) -> None:
+    session = async_get_clientsession(hass)
+    async with session.post(
+        f"{rust_backend.origin}/v1/items",
+        headers={
+            "Authorization": f"Bearer {rust_backend.owner_token}",
+            "Idempotency-Key": "create-delete-example",
+        },
+        json={
+            "id": "example-delete-task",
+            "name": "Example equipment",
+            "summary": "Check example equipment",
+            "timezone": "UTC",
+            "schedule": {"kind": "once"},
+        },
+    ) as response:
+        assert response.status == 201
+        original = MaintenanceItem.parse(await response.json())
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    path = f"{PREFIX}/items/{original.id}"
+    user = await hass_client(hass_user_token)
+    assert (await user.delete(path, headers={"If-Match": '"1"'})).status == 403
+    admin = await hass_client()
+    assert (await admin.delete(path, headers={"If-Match": '"1"'})).status == 409
+    response = await admin.put(f"{path}/archive", headers={"If-Match": '"1"'})
+    assert response.status == 200
+    archived = MaintenanceItem.parse(await response.json())
+    assert archived.archived
+    assert (await admin.delete(path)).status == 428
+    assert (await admin.delete(path, headers={"If-Match": '"1"'})).status == 412
+    headers = {"If-Match": f'"{archived.revision}"'}
+    response = await admin.delete(path, headers=headers)
+    assert response.status == 204
+    assert await response.read() == b""
+    assert (await admin.delete(path, headers=headers)).status == 204
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert (await admin.get(path)).status == 404
+    assert (await admin.get(f"{path}/events")).status == 404
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "0"
+    assert entry.runtime_data.data is not None
+    assert entry.runtime_data.data.items == ()

@@ -29,7 +29,8 @@ on amd64 and arm64.
 Tasks can include a description, checklist, instructions, resource links, and
 links to multiple Home Assistant devices or entities. Associations survive
 entity renames. Completion records retain the checklist as it was when the work
-was done; archiving a task preserves its history.
+was done; archiving a task preserves its history. Archived tasks can also be
+permanently deleted, including their completion history.
 
 | Type | Behavior |
 | --- | --- |

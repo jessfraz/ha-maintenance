@@ -186,6 +186,12 @@ https://home-assistant.example/app/<repository-app-slug>/items/example-air-filte
 Temporary ingress session URLs expire. Keep the repository URL and item IDs
 stable after programming tags. Archive retired items to preserve history.
 
+To remove an item and its completion history permanently, open it from
+**Archived** and choose **Delete permanently**. Confirm the named item before
+deleting. Administrators can delete ordinary tasks; standing instructions
+require the owner. Reorder requests are kept. Deleted IDs and migration source
+mappings stay reserved so an import or retry cannot recreate the item.
+
 ## Standalone Docker
 
 The same image runs without Home Assistant. Generate two distinct credentials
@@ -199,7 +205,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.5.1
+  ghcr.io/jessfraz/ha-maintenance:0.6.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

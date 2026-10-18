@@ -63,6 +63,7 @@ async def test_authentication_and_human_attribution(
     [
         ("post", "items"),
         ("patch", f"items/{ITEM_ID}"),
+        ("delete", f"items/{ITEM_ID}"),
         ("put", f"items/{ITEM_ID}/archive"),
         ("delete", f"items/{ITEM_ID}/archive"),
         ("put", f"reorders/{REORDER_ID}/resolution"),
@@ -93,25 +94,27 @@ async def test_only_admin_can_change_definitions_or_resolve_reorders(
     assert "X-Maintenance-Owner" not in forwarded.headers
 
 
+@pytest.mark.parametrize("method", ["patch", "delete"])
 async def test_owner_claim_comes_only_from_verified_ha_owner(
     hass: HomeAssistant,
     hass_client: ClientSessionGenerator,
     hass_owner_user: MockUser,
     entry: MaintenanceConfigEntry,
     backend: Backend,
+    method: str,
 ) -> None:
     refresh_token = await hass.auth.async_create_refresh_token(
         hass_owner_user, client_id="https://example.invalid"
     )
     client = await hass_client(hass.auth.async_create_access_token(refresh_token))
-    response = await client.patch(
+    response = await getattr(client, method)(
         f"{PREFIX}/items/{ITEM_ID}",
         json={},
         headers={"X-Maintenance-Actor-Id": "forged", "X-Maintenance-Owner": "false"},
     )
     assert response.status == 200
     forwarded = next(
-        request for request in backend.requests if request.method == "PATCH"
+        request for request in backend.requests if request.method == method.upper()
     )
     assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_owner_user.id}"
     assert forwarded.headers["X-Maintenance-Admin"] == "true"
@@ -125,7 +128,7 @@ async def test_owner_claim_comes_only_from_verified_ha_owner(
         ("post", "integration/presence", 404),
         ("get", "installation", 404),
         ("get", "items/invalid_id", 404),
-        ("delete", f"items/{ITEM_ID}", 405),
+        ("put", f"items/{ITEM_ID}", 405),
         ("post", f"items/{ITEM_ID}/events", 405),
         ("get", "items?url=http://elsewhere.invalid", 400),
         ("get", "summary?archived=true", 400),

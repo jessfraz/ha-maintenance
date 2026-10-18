@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+
+- Move summary filters below the Queue heading and use the same status colors as Shipments, including dark mode.
+- Permanently delete an archived item and its completion history from its detail view, with explicit confirmation and revision checks.
+- Keep deleted IDs and source mappings reserved so imports and retries cannot recreate deleted tasks. Reorder requests stay available.
+
 ## 0.5.1
 
 - Show the Home Assistant Instructions list only while active instructions exist.

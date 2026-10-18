@@ -6,6 +6,8 @@ pub enum Error {
     Forbidden,
     #[error("maintenance item not found")]
     NotFound,
+    #[error("the maintenance item was permanently deleted")]
+    Deleted,
     #[error("{0}")]
     Conflict(&'static str),
     #[error("the item changed; refresh before trying again")]
@@ -27,6 +29,7 @@ impl From<Error> for dropshot::HttpError {
             Error::Invalid(_) => (Status::BAD_REQUEST, "invalid_input"),
             Error::Forbidden => (Status::FORBIDDEN, "owner_required"),
             Error::NotFound => (Status::NOT_FOUND, "not_found"),
+            Error::Deleted => (Status::GONE, "item_deleted"),
             Error::Conflict(_) => (Status::CONFLICT, "conflict"),
             Error::Precondition => (Status::PRECONDITION_FAILED, "revision_conflict"),
             _ => return Self::for_internal_error(error.to_string()),

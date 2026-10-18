@@ -433,6 +433,26 @@ async fn item_get(
         request.context().store.get(&path.into_inner().id).await?,
     ))
 }
+/// Permanently remove an archived item and its completion history.
+///
+/// Reorder receipts remain available; deleted item and source IDs stay reserved.
+#[endpoint {method=DELETE,path="/v1/items/{id}",tags=["items"]}]
+async fn item_delete(
+    request: RequestContext<Arc<Context>>,
+    path: Path<ItemPath>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let principal = administrator(&request).await?;
+    request
+        .context()
+        .store
+        .delete(
+            &path.into_inner().id,
+            revision(&request)?,
+            principal.management(),
+        )
+        .await?;
+    Ok(HttpResponseUpdatedNoContent())
+}
 /// Omitted fields stay unchanged; null clears only optional fields.
 #[endpoint {method=PATCH,path="/v1/items/{id}",tags=["items"]}]
 async fn item_update(
@@ -824,13 +844,14 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 29] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 30] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
         migration_preview.into(),
         migration_apply.into(),
         item_get.into(),
+        item_delete.into(),
         item_update.into(),
         item_complete.into(),
         item_reorder.into(),
