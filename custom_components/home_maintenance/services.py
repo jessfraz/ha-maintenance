@@ -27,12 +27,12 @@ from .models import ITEM_ID, MaintenanceItem
 
 
 class CompletionResult(TypedDict):
-    """The next backend-owned occurrence returned to an HA script."""
+    """The backend-owned occurrence returned to an HA script."""
 
     id: str
     revision: int
     occurrence_id: str
-    due: str
+    due: str | None
 
 
 class ChecklistStepResult(CompletionResult):
@@ -213,7 +213,7 @@ def async_register_services(hass: HomeAssistant) -> None:
                 "id": item.id,
                 "revision": item.revision,
                 "occurrence_id": str(item.occurrence_id),
-                "due": item.due.isoformat(),
+                "due": item.due.isoformat() if item.due is not None else None,
             }
             if call.service == "set_checklist_step":
                 step = next(

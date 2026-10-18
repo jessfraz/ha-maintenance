@@ -319,3 +319,46 @@ async def test_calendar_outage_recovery_empty_inventory_and_unload(
     assert state.state == "unavailable"
     response = await client.get("/api/calendars/calendar.maintenance", params=params)
     assert response.status == 400
+
+
+async def test_calendar_only_projects_active_dated_occurrences(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    """A mixed inventory keeps known dates and omits completed or undated work."""
+    records = [
+        item_record(due="2026-10-16"),
+        item_record(
+            item_id="undated-task",
+            occurrence_id=NEXT_OCCURRENCE_ID,
+            due=None,
+        ),
+        item_record(
+            item_id="completed-task",
+            occurrence_id="0193c69f-e5c4-7e93-b6cb-8172dacb6182",
+            status="completed",
+        ),
+        item_record(
+            item_id="archived-task",
+            occurrence_id="0193c69f-e5c4-7e93-b6cb-8172dacb6183",
+            archived=True,
+        ),
+    ]
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps({"items": records, "next_page": None}).encode(),
+        {},
+    )
+    await entry.runtime_data.async_refresh()
+    client = await hass_client()
+    response = await client.get(
+        "/api/calendars/calendar.maintenance",
+        params={"start": "2026-10-14T00:00:00Z", "end": "2026-10-18T00:00:00Z"},
+    )
+    assert response.status == 200
+    events = await response.json()
+    assert len(events) == 1
+    assert events[0]["uid"] == OCCURRENCE_ID
+    assert events[0]["start"] == {"date": "2026-10-16"}

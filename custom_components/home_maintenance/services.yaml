@@ -1,6 +1,6 @@
 complete:
   name: Complete an occurrence
-  description: Record completion and let the Maintenance service schedule the next occurrence.
+  description: Record completion using the task's schedule.
   fields:
     item_id:
       name: Item ID

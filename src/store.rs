@@ -1,4 +1,8 @@
-use std::{path::Path, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    time::Duration,
+};
 
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,9 +16,11 @@ use uuid::Uuid;
 use crate::{
     error::Error,
     models::{
-        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Occurrence, Page,
-        Reorder, ReorderContent, ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder,
-        SetChecklistStep, StepCompletion, Summary, UpdateItem,
+        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, ImportedCompletion, Item,
+        ItemId, ItemStatus, Migration, MigrationAction, MigrationItem, MigrationMapping,
+        MigrationReport, Occurrence, Page, Reorder, ReorderContent, ReorderItem, ReorderReceipt,
+        ReorderStatus, ResolveReorder, Schedule, SetChecklistStep, StepCompletion, Summary,
+        UpdateItem,
     },
 };
 
@@ -25,8 +31,8 @@ pub struct Store {
 
 // Definitions are one typed, versioned document. Indexed lifecycle/order fields
 // live in columns; history is append-only and never hidden inside that document.
-const EVENT_LIST: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist FROM completions WHERE item_id=? ORDER BY sequence DESC LIMIT ?";
-const EVENT_LIST_NEXT: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist FROM completions WHERE item_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?";
+const EVENT_LIST: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist,source FROM completions WHERE item_id=? ORDER BY sequence DESC LIMIT ?";
+const EVENT_LIST_NEXT: &str = "SELECT sequence,id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist,source FROM completions WHERE item_id=? AND sequence<? ORDER BY sequence DESC LIMIT ?";
 const IDEMPOTENCY_GET: &str =
     "SELECT fingerprint,response FROM idempotency WHERE actor=? AND key=?";
 const IDEMPOTENCY_INSERT: &str =
@@ -38,10 +44,9 @@ const CHECKLIST_UPDATE: &str = "UPDATE items SET checklist=?,revision=? WHERE id
 const ITEM_ARCHIVE: &str = "UPDATE items SET archived=?,revision=? WHERE id=?";
 const DATABASE_NOW: &str = "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const COMPLETION_INSERT: &str = "INSERT INTO completions(id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist) VALUES (?,?,?,?,?,?,?,?)";
-const OCCURRENCE_ADVANCE: &str =
-    "UPDATE items SET due=?,occurrence_id=?,revision=?,last_completion_id=?,checklist=? WHERE id=?";
-const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 ORDER BY due,id LIMIT 200";
-const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND (due,id)>(?,?) ORDER BY due,id LIMIT 200";
+const OCCURRENCE_ADVANCE: &str = "UPDATE items SET due=?,occurrence_id=?,revision=?,last_completion_id=?,checklist=?,status=? WHERE id=?";
+const SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' ORDER BY sort_due,id LIMIT 200";
+const SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND status='needs_action' AND (sort_due,id)>(?,?) ORDER BY sort_due,id LIMIT 200";
 const COMPLETION_COUNT: &str = "SELECT count(*) FROM completions";
 const REORDER_INSERT: &str = "INSERT INTO reorders(id,receipt) VALUES(?,?)";
 const REORDER_GET: &str =
@@ -50,6 +55,18 @@ const REORDER_LIST: &str = "SELECT sequence,receipt,status,revision,resolved_at,
 const REORDER_LIST_NEXT: &str = "SELECT sequence,receipt,status,revision,resolved_at,resolved_by FROM reorders WHERE status=? AND sequence>? ORDER BY sequence LIMIT ?";
 const REORDER_RESOLVE: &str =
     "UPDATE reorders SET status=?,revision=?,resolved_at=?,resolved_by=? WHERE id=?";
+const MIGRATION_SOURCES: &str = "SELECT source_key,target_id,fingerprint FROM migration_sources WHERE source_key IN (SELECT value FROM json_each(?))";
+const MIGRATION_TARGETS: &str = "SELECT id FROM items WHERE id IN (SELECT value FROM json_each(?))";
+const MIGRATION_EVENT_IDS: &str =
+    "SELECT id FROM completions WHERE id IN (SELECT value FROM json_each(?))";
+const MIGRATION_OCCURRENCES: &str = "SELECT occurrence_id FROM completions WHERE occurrence_id IN (SELECT value FROM json_each(?1)) UNION ALL SELECT occurrence_id FROM items WHERE occurrence_id IN (SELECT value FROM json_each(?1))";
+const MIGRATION_EVENT_SOURCES: &str =
+    "SELECT source_key FROM completions WHERE source_key IN (SELECT value FROM json_each(?))";
+const MIGRATION_SOURCE_INSERT: &str =
+    "INSERT INTO migration_sources(source_key,target_id,fingerprint) VALUES(?,?,?)";
+const MIGRATION_ITEM_UPDATE: &str =
+    "UPDATE items SET status=?,archived=?,source=?,source_key=?,last_completion_id=? WHERE id=?";
+const MIGRATION_EVENT_INSERT: &str = "INSERT INTO completions(id,item_id,occurrence_id,completed_at,actor,previous_due,next_due,checklist,source,source_key) VALUES(?,?,?,?,?,?,?,?,?,?)";
 #[derive(FromRow)]
 struct ReorderRow {
     sequence: i64,
@@ -88,7 +105,9 @@ struct ItemRow {
     revision: i64,
     archived: bool,
     occurrence_id: String,
-    due: String,
+    status: String,
+    source: Option<String>,
+    due: Option<String>,
     checklist: String,
     completion_id: Option<String>,
     completed_occurrence: Option<String>,
@@ -97,32 +116,45 @@ struct ItemRow {
     previous_due: Option<String>,
     next_due: Option<String>,
     completion_checklist: Option<String>,
+    completion_source: Option<String>,
 }
 macro_rules! item_select {
-    () => { "SELECT i.id,i.definition,i.revision,i.archived,i.occurrence_id,i.due,i.checklist,c.id AS completion_id,c.occurrence_id AS completed_occurrence,c.completed_at,c.actor,c.previous_due,c.next_due,c.checklist AS completion_checklist FROM items i LEFT JOIN completions c ON c.sequence=i.last_completion_id" };
+    () => { "SELECT i.id,i.definition,i.revision,i.archived,i.status,i.source,i.occurrence_id,i.due,i.checklist,c.id AS completion_id,c.occurrence_id AS completed_occurrence,c.completed_at,c.actor,c.previous_due,c.next_due,c.checklist AS completion_checklist,c.source AS completion_source FROM items i LEFT JOIN completions c ON c.sequence=i.last_completion_id" };
 }
 const ITEM_GET: &str = concat!(item_select!(), " WHERE i.id=?");
 const ITEM_LIST: &str = concat!(
     item_select!(),
-    " WHERE i.archived=? ORDER BY i.due,i.id LIMIT ?"
+    " WHERE i.archived=? ORDER BY i.sort_due,i.id LIMIT ?"
 );
 const ITEM_LIST_NEXT: &str = concat!(
     item_select!(),
-    " WHERE i.archived=? AND (i.due,i.id)>(?,?) ORDER BY i.due,i.id LIMIT ?"
+    " WHERE i.archived=? AND (i.sort_due,i.id)>(?,?) ORDER BY i.sort_due,i.id LIMIT ?"
 );
 #[derive(FromRow)]
 struct CompletionRow {
     sequence: i64,
     id: String,
     item_id: String,
-    occurrence_id: String,
-    completed_at: String,
-    actor: String,
-    previous_due: String,
-    next_due: String,
+    occurrence_id: Option<String>,
+    completed_at: Option<String>,
+    actor: Option<String>,
+    previous_due: Option<String>,
+    next_due: Option<String>,
     checklist: String,
+    source: Option<String>,
 }
 
+fn sort_due(due: Option<NaiveDate>) -> String {
+    due.map(|date| date.to_string())
+        .unwrap_or_else(|| "9999-12-31".into())
+}
+fn parse_status(value: &str) -> Result<ItemStatus, Error> {
+    match value {
+        "needs_action" => Ok(ItemStatus::NeedsAction),
+        "completed" => Ok(ItemStatus::Completed),
+        _ => Err(corrupt()),
+    }
+}
 fn corrupt() -> Error {
     Error::Corrupt
 }
@@ -141,44 +173,45 @@ impl TryFrom<ItemRow> for Item {
     type Error = Error;
     fn try_from(row: ItemRow) -> Result<Self, Error> {
         let id = ItemId::try_from(row.id).map_err(|_| corrupt())?;
-        let last_completion = match (
-            row.completion_id,
-            row.completed_occurrence,
-            row.completed_at,
-            row.actor,
-            row.previous_due,
-            row.next_due,
-            row.completion_checklist,
-        ) {
-            (None, None, None, None, None, None, None) => None,
-            (
-                Some(event_id),
-                Some(occurrence),
-                Some(at),
-                Some(actor),
-                Some(previous),
-                Some(next),
-                Some(checklist),
-            ) => Some(Completion {
+        let last_completion = if let Some(event_id) = row.completion_id {
+            Some(Completion {
                 id: parse_uuid(&event_id)?,
                 item_id: id.clone(),
-                occurrence_id: parse_uuid(&occurrence)?,
-                completed_at: parse_time(&at)?,
-                actor: serde_json::from_str(&actor)?,
-                previous_due: parse_date(&previous)?,
-                next_due: parse_date(&next)?,
-                checklist: serde_json::from_str(&checklist)?,
-            }),
-            _ => return Err(corrupt()),
+                occurrence_id: row
+                    .completed_occurrence
+                    .as_deref()
+                    .map(parse_uuid)
+                    .transpose()?,
+                completed_at: row.completed_at.as_deref().map(parse_time).transpose()?,
+                actor: row.actor.as_deref().map(serde_json::from_str).transpose()?,
+                previous_due: row.previous_due.as_deref().map(parse_date).transpose()?,
+                next_due: row.next_due.as_deref().map(parse_date).transpose()?,
+                checklist: serde_json::from_str(
+                    row.completion_checklist.as_deref().ok_or_else(corrupt)?,
+                )?,
+                source: row
+                    .completion_source
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?,
+            })
+        } else {
+            None
         };
         Ok(Self {
             id,
             definition: serde_json::from_str(&row.definition)?,
             revision: row.revision,
             archived: row.archived,
+            status: parse_status(&row.status)?,
+            source: row
+                .source
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             occurrence: Occurrence {
                 id: parse_uuid(&row.occurrence_id)?,
-                due: parse_date(&row.due)?,
+                due: row.due.as_deref().map(parse_date).transpose()?,
                 checklist: serde_json::from_str(&row.checklist)?,
             },
             last_completion,
@@ -191,11 +224,16 @@ impl TryFrom<CompletionRow> for Completion {
         Ok(Self {
             id: parse_uuid(&row.id)?,
             item_id: ItemId::try_from(row.item_id).map_err(|_| corrupt())?,
-            occurrence_id: parse_uuid(&row.occurrence_id)?,
-            completed_at: parse_time(&row.completed_at)?,
-            actor: serde_json::from_str(&row.actor)?,
-            previous_due: parse_date(&row.previous_due)?,
-            next_due: parse_date(&row.next_due)?,
+            occurrence_id: row.occurrence_id.as_deref().map(parse_uuid).transpose()?,
+            completed_at: row.completed_at.as_deref().map(parse_time).transpose()?,
+            actor: row.actor.as_deref().map(serde_json::from_str).transpose()?,
+            previous_due: row.previous_due.as_deref().map(parse_date).transpose()?,
+            next_due: row.next_due.as_deref().map(parse_date).transpose()?,
+            source: row
+                .source
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             checklist: serde_json::from_str(&row.checklist)?,
         })
     }
@@ -204,7 +242,7 @@ impl TryFrom<CompletionRow> for Completion {
 #[serde(deny_unknown_fields)]
 struct ItemCursor {
     archived: bool,
-    due: NaiveDate,
+    due: Option<NaiveDate>,
     id: ItemId,
 }
 #[derive(Serialize, Deserialize)]
@@ -269,7 +307,7 @@ impl Store {
         let rows: Vec<ItemRow> = if let Some(after) = after {
             sqlx::query_as(ITEM_LIST_NEXT)
                 .bind(archived)
-                .bind(after.due.to_string())
+                .bind(sort_due(after.due))
                 .bind(after.id.as_ref())
                 .bind(i64::from(limit) + 1)
                 .fetch_all(&self.pool)
@@ -354,7 +392,7 @@ impl Store {
     }
     pub async fn create(&self, input: CreateItem, actor: &Actor, key: &str) -> Result<Item, Error> {
         input.validate()?;
-        let fingerprint = fingerprint("create", &input)?;
+        let fingerprint = create_fingerprint(&input)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         if let Some(item) = replay(&mut transaction, actor, key, &fingerprint).await? {
             return Ok(item);
@@ -384,6 +422,65 @@ impl Store {
             next_page: None,
         })
     }
+    /// Preview is one read snapshot and never creates an item, event, or receipt.
+    pub async fn preview_migration(&self, input: Migration) -> Result<MigrationReport, Error> {
+        input.validate()?;
+        let mut transaction = self.pool.begin().await?;
+        let report = migration_report(&mut transaction, &input).await?;
+        transaction.commit().await?;
+        Ok(report)
+    }
+    /// Mapping, history and the immutable request receipt commit together.
+    pub async fn migrate(
+        &self,
+        input: Migration,
+        actor: &Actor,
+        key: &str,
+    ) -> Result<MigrationReport, Error> {
+        let fingerprint = fingerprint("migrate", &input)?;
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        if let Some(report) = replay(&mut transaction, actor, key, &fingerprint).await? {
+            return Ok(report);
+        }
+        input.validate()?;
+        let report = migration_report(&mut transaction, &input).await?;
+        if !report.applicable {
+            return Err(Error::Conflict(
+                "migration conflicts; run the preview for the mapping report",
+            ));
+        }
+        for (input, mapping) in input.items.iter().zip(&report.items) {
+            if mapping.action == MigrationAction::Unchanged {
+                continue;
+            }
+            insert_item(&mut transaction, &input.item).await?;
+            let source = serde_json::to_string(&input.source)?;
+            let mut last = None;
+            for event in &input.history {
+                last = Some(
+                    insert_imported_completion(&mut transaction, &input.item.id, event).await?,
+                );
+            }
+            sqlx::query(MIGRATION_ITEM_UPDATE)
+                .bind(input.status.as_str())
+                .bind(input.archived)
+                .bind(&source)
+                .bind(&source)
+                .bind(last)
+                .bind(input.item.id.as_ref())
+                .execute(&mut *transaction)
+                .await?;
+            sqlx::query(MIGRATION_SOURCE_INSERT)
+                .bind(source)
+                .bind(input.item.id.as_ref())
+                .bind(fingerprint_item(input)?)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        save_replay(&mut transaction, actor, key, &fingerprint, &report).await?;
+        transaction.commit().await?;
+        Ok(report)
+    }
     pub async fn update(
         &self,
         id: &ItemId,
@@ -398,7 +495,7 @@ impl Store {
         let revision = next_revision(item.revision)?;
         sqlx::query(ITEM_UPDATE)
             .bind(serde_json::to_string(&item.definition)?)
-            .bind(item.occurrence.due.to_string())
+            .bind(item.occurrence.due.map(|due| due.to_string()))
             .bind(serde_json::to_string(&item.occurrence.checklist)?)
             .bind(revision)
             .bind(id.as_ref())
@@ -439,8 +536,10 @@ impl Store {
         }
         let item = get_item(&mut transaction, id).await?;
         check_revision(&item, revision)?;
-        if item.archived {
-            return Err(Error::Conflict("archived items cannot be completed"));
+        if item.archived || item.status == ItemStatus::Completed {
+            return Err(Error::Conflict(
+                "archived or completed items cannot be completed",
+            ));
         }
         if item.occurrence.id != input.occurrence_id {
             return Err(Error::Conflict("this occurrence is no longer current"));
@@ -449,11 +548,17 @@ impl Store {
             .fetch_one(&mut *transaction)
             .await?;
         let completed_at = parse_time(&now)?;
-        let next_due = item.definition.schedule.next(
-            completed_at
-                .with_timezone(&item.definition.timezone.0)
-                .date_naive(),
-        )?;
+        let next_due = match item.definition.schedule {
+            Schedule::Recurring { interval } => Some(
+                interval.next(
+                    completed_at
+                        .with_timezone(&item.definition.timezone.0)
+                        .date_naive(),
+                )?,
+            ),
+            Schedule::Once | Schedule::Standing => None,
+        };
+        let once = item.definition.schedule == Schedule::Once;
         let event_id = Uuid::now_v7();
         let sequence = sqlx::query(COMPLETION_INSERT)
             .bind(event_id.to_string())
@@ -461,20 +566,30 @@ impl Store {
             .bind(input.occurrence_id.to_string())
             .bind(now)
             .bind(serde_json::to_string(actor)?)
-            .bind(item.occurrence.due.to_string())
-            .bind(next_due.to_string())
+            .bind(item.occurrence.due.map(|due| due.to_string()))
+            .bind(next_due.map(|due| due.to_string()))
             .bind(serde_json::to_string(&item.occurrence.checklist)?)
             .execute(&mut *transaction)
             .await?
             .last_insert_rowid();
         sqlx::query(OCCURRENCE_ADVANCE)
-            .bind(next_due.to_string())
-            .bind(Uuid::now_v7().to_string())
+            .bind(if once { item.occurrence.due } else { next_due }.map(|due| due.to_string()))
+            .bind(
+                if once {
+                    item.occurrence.id
+                } else {
+                    Uuid::now_v7()
+                }
+                .to_string(),
+            )
             .bind(next_revision(item.revision)?)
             .bind(sequence)
-            .bind(serde_json::to_string(
-                &item.definition.checklist_state(&[]),
-            )?)
+            .bind(serde_json::to_string(&if once {
+                item.occurrence.checklist.clone()
+            } else {
+                item.definition.checklist_state(&[])
+            })?)
+            .bind(if once { "completed" } else { "needs_action" })
             .bind(id.as_ref())
             .execute(&mut *transaction)
             .await?;
@@ -500,8 +615,10 @@ impl Store {
         }
         let mut item = get_item(&mut transaction, id).await?;
         check_revision(&item, revision)?;
-        if item.archived {
-            return Err(Error::Conflict("archived items cannot be checked"));
+        if item.archived || item.status == ItemStatus::Completed {
+            return Err(Error::Conflict(
+                "archived or completed items cannot be checked",
+            ));
         }
         if item.occurrence.id != input.occurrence_id {
             return Err(Error::Conflict("this occurrence is no longer current"));
@@ -688,7 +805,7 @@ impl Store {
         struct DueRow {
             id: String,
             timezone: String,
-            due: String,
+            due: Option<String>,
         }
         // SQLite has no IANA timezone arithmetic. Read only dates/timezones in
         // bounded keyset pages; instructions, household metadata and history are
@@ -718,8 +835,10 @@ impl Store {
                 let zone = crate::models::TimeZone::try_from(row.timezone.clone())
                     .map_err(|_| corrupt())?;
                 let today = now.with_timezone(&zone.0).date_naive();
-                let due = parse_date(&row.due)?;
                 summary.active += 1;
+                let Some(due) = row.due.as_deref().map(parse_date).transpose()? else {
+                    continue;
+                };
                 if due < today {
                     summary.overdue += 1;
                 }
@@ -734,7 +853,12 @@ impl Store {
             if rows.len() < 200 {
                 break;
             }
-            after = rows.last().map(|row| (row.due.clone(), row.id.clone()));
+            after = rows.last().map(|row| {
+                (
+                    row.due.clone().unwrap_or_else(|| "9999-12-31".into()),
+                    row.id.clone(),
+                )
+            });
         }
         summary.completed = sqlx::query_scalar(COMPLETION_COUNT)
             .fetch_one(&mut *transaction)
@@ -742,6 +866,206 @@ impl Store {
         transaction.commit().await?;
         Ok(summary)
     }
+}
+fn fingerprint_item(item: &MigrationItem) -> Result<Vec<u8>, Error> {
+    fingerprint("migration-item", item)
+}
+fn count_values<T: Ord>(values: impl Iterator<Item = T>) -> BTreeMap<T, usize> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(value).or_insert(0) += 1;
+    }
+    counts
+}
+async fn migration_report(
+    connection: &mut SqliteConnection,
+    input: &Migration,
+) -> Result<MigrationReport, Error> {
+    let source_keys = input
+        .items
+        .iter()
+        .map(|item| serde_json::to_string(&item.source))
+        .collect::<Result<Vec<_>, _>>()?;
+    let targets = input
+        .items
+        .iter()
+        .map(|item| item.item.id.as_ref())
+        .collect::<Vec<_>>();
+    let ids = input
+        .items
+        .iter()
+        .flat_map(|item| item.history.iter().filter_map(|event| event.id))
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
+    let occurrences = input
+        .items
+        .iter()
+        .flat_map(|item| item.history.iter().filter_map(|event| event.occurrence_id))
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
+    let event_sources = input
+        .items
+        .iter()
+        .flat_map(|item| {
+            item.history
+                .iter()
+                .filter_map(|event| event.source.as_ref())
+        })
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?;
+    let sources: Vec<(String, String, Vec<u8>)> = sqlx::query_as(MIGRATION_SOURCES)
+        .bind(serde_json::to_string(&source_keys)?)
+        .fetch_all(&mut *connection)
+        .await?;
+    let sources = sources
+        .into_iter()
+        .map(|(source, target, fingerprint)| (source, (target, fingerprint)))
+        .collect::<BTreeMap<_, _>>();
+    let existing_targets: BTreeSet<String> = sqlx::query_scalar::<_, String>(MIGRATION_TARGETS)
+        .bind(serde_json::to_string(&targets)?)
+        .fetch_all(&mut *connection)
+        .await?
+        .into_iter()
+        .collect();
+    let existing_ids: BTreeSet<String> = sqlx::query_scalar::<_, String>(MIGRATION_EVENT_IDS)
+        .bind(serde_json::to_string(&ids)?)
+        .fetch_all(&mut *connection)
+        .await?
+        .into_iter()
+        .collect();
+    let existing_occurrences: BTreeSet<String> =
+        sqlx::query_scalar::<_, String>(MIGRATION_OCCURRENCES)
+            .bind(serde_json::to_string(&occurrences)?)
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
+    let existing_event_sources: BTreeSet<String> =
+        sqlx::query_scalar::<_, String>(MIGRATION_EVENT_SOURCES)
+            .bind(serde_json::to_string(&event_sources)?)
+            .fetch_all(&mut *connection)
+            .await?
+            .into_iter()
+            .collect();
+    let source_counts = count_values(source_keys.iter());
+    let target_counts = count_values(targets.iter());
+    let id_counts = count_values(ids.iter());
+    let occurrence_counts = count_values(occurrences.iter());
+    let event_source_counts = count_values(event_sources.iter());
+    let mut mappings = Vec::with_capacity(input.items.len());
+    for (item, source) in input.items.iter().zip(&source_keys) {
+        let mut conflicts = Vec::new();
+        if source_counts.get(source).is_some_and(|count| *count > 1) {
+            conflicts.push("duplicate source identity in migration".into());
+        }
+        if target_counts
+            .get(&item.item.id.as_ref())
+            .is_some_and(|count| *count > 1)
+        {
+            conflicts.push("duplicate target id in migration".into());
+        }
+        let unchanged = if let Some((target, stored)) = sources.get(source) {
+            if target == item.item.id.as_ref() && *stored == fingerprint_item(item)? {
+                true
+            } else {
+                conflicts.push(
+                    "source identity was already imported with different content or target".into(),
+                );
+                false
+            }
+        } else {
+            if existing_targets.contains(item.item.id.as_ref()) {
+                conflicts.push("target item id already exists".into());
+            }
+            false
+        };
+        for event in &item.history {
+            for (value, counts, existing, label) in [
+                (
+                    event.id.map(|id| id.to_string()),
+                    &id_counts,
+                    &existing_ids,
+                    "event id",
+                ),
+                (
+                    event.occurrence_id.map(|id| id.to_string()),
+                    &occurrence_counts,
+                    &existing_occurrences,
+                    "event occurrence id",
+                ),
+                (
+                    event
+                        .source
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
+                    &event_source_counts,
+                    &existing_event_sources,
+                    "event source identity",
+                ),
+            ] {
+                if let Some(value) = value {
+                    if counts.get(&value).is_some_and(|count| *count > 1) {
+                        conflicts.push(format!("duplicate {label} in migration"));
+                    }
+                    if !unchanged && existing.contains(&value) {
+                        conflicts.push(format!("{label} already exists"));
+                    }
+                }
+            }
+        }
+        conflicts.sort();
+        conflicts.dedup();
+        let action = if !conflicts.is_empty() {
+            MigrationAction::Conflict
+        } else if unchanged {
+            MigrationAction::Unchanged
+        } else {
+            MigrationAction::Created
+        };
+        mappings.push(MigrationMapping {
+            source: item.source.clone(),
+            target_id: item.item.id.clone(),
+            action,
+            conflicts,
+            history_events: item.history.len(),
+        });
+    }
+    Ok(MigrationReport {
+        applicable: mappings.iter().all(|mapping| mapping.conflicts.is_empty()),
+        items: mappings,
+    })
+}
+async fn insert_imported_completion(
+    connection: &mut SqliteConnection,
+    item: &ItemId,
+    event: &ImportedCompletion,
+) -> Result<i64, Error> {
+    let source = event
+        .source
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    Ok(sqlx::query(MIGRATION_EVENT_INSERT)
+        .bind(event.id.unwrap_or_else(Uuid::now_v7).to_string())
+        .bind(item.as_ref())
+        .bind(event.occurrence_id.map(|id| id.to_string()))
+        .bind(event.completed_at.map(|at| at.to_rfc3339()))
+        .bind(
+            event
+                .actor
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        )
+        .bind(event.previous_due.map(|due| due.to_string()))
+        .bind(event.next_due.map(|due| due.to_string()))
+        .bind(serde_json::to_string(&event.checklist)?)
+        .bind(&source)
+        .bind(&source)
+        .execute(connection)
+        .await?
+        .last_insert_rowid())
 }
 fn check_revision(item: &Item, revision: i64) -> Result<(), Error> {
     if item.revision != revision {
@@ -776,7 +1100,7 @@ async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> R
         .bind(input.id.as_ref())
         .bind(serde_json::to_string(&input.definition)?)
         .bind(Uuid::now_v7().to_string())
-        .bind(input.due.to_string())
+        .bind(input.due.map(|due| due.to_string()))
         .bind(serde_json::to_string(
             &input.definition.checklist_state(&[]),
         )?)
@@ -788,6 +1112,51 @@ async fn insert_item(connection: &mut SqliteConnection, input: &CreateItem) -> R
             Err(Error::Conflict("item id already exists"))
         }
         Err(error) => Err(error.into()),
+    }
+}
+fn create_fingerprint(input: &CreateItem) -> Result<Vec<u8>, Error> {
+    // Keep the original canonical fingerprint for existing recurring creates.
+    // Receipt JSON is upgraded by the schema migration; operation identity is not.
+    #[derive(Serialize)]
+    struct LegacyCreate<'a> {
+        id: &'a ItemId,
+        due: NaiveDate,
+        name: &'a str,
+        summary: &'a str,
+        description: &'a Option<String>,
+        timezone: crate::models::TimeZone,
+        location: &'a Option<String>,
+        group: &'a Option<String>,
+        schedule: crate::models::Interval,
+        instructions: &'a [String],
+        checklist: &'a [crate::models::ChecklistStep],
+        specs: &'a [crate::models::Spec],
+        resources: &'a [crate::models::Resource],
+        reorder_url: &'a Option<String>,
+    }
+    if let (Some(due), Schedule::Recurring { interval }) = (input.due, input.definition.schedule) {
+        let definition = &input.definition;
+        fingerprint(
+            "create",
+            &LegacyCreate {
+                id: &input.id,
+                due,
+                name: &definition.name,
+                summary: &definition.summary,
+                description: &definition.description,
+                timezone: definition.timezone,
+                location: &definition.location,
+                group: &definition.group,
+                schedule: interval,
+                instructions: &definition.instructions,
+                checklist: &definition.checklist,
+                specs: &definition.specs,
+                resources: &definition.resources,
+                reorder_url: &definition.reorder_url,
+            },
+        )
+    } else {
+        fingerprint("create", input)
     }
 }
 fn fingerprint(operation: &str, input: &impl Serialize) -> Result<Vec<u8>, Error> {
@@ -889,7 +1258,7 @@ mod tests {
                 let mut input = seed.items[0].clone();
                 input.id = format!("example-{batch:02}-{index:03}").try_into().unwrap();
                 input.due =
-                    NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap();
+                    Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap());
                 items.push(input);
             }
             store.import(ImportCatalog { items }).await.unwrap();
@@ -1060,7 +1429,7 @@ mod tests {
             .iter()
             .map(|row| row.get::<String, _>("detail"))
             .collect::<Vec<_>>();
-        assert!(details.iter().any(|line| line.contains("items_due")));
+        assert!(details.iter().any(|line| line.contains("items_active_due")));
         assert!(!details.iter().any(|line| line.contains("TEMP B-TREE")));
         evidence.push(("summary continuation", details));
         for (name, query) in [
@@ -1168,6 +1537,7 @@ mod tests {
                     Integer(42),
                     Integer(20),
                     Text(checklist),
+                    Text("needs_action".into()),
                     Text(id.as_ref().into()),
                 ],
             ),
@@ -1211,16 +1581,23 @@ mod tests {
         store.close().await.unwrap();
     }
     #[tokio::test]
-    async fn reorder_migration_preserves_existing_tasks_history_and_receipts() {
-        use crate::models::ReorderItem;
+    async fn migration_fidelity_upgrade_preserves_existing_state_and_all_receipt_kinds() {
+        use crate::models::{ChecklistStepState, ReorderContent, ReorderItem, ReorderReceipt};
         let directory = tempfile::tempdir().unwrap();
         let migration_directory = directory.path().join("old-migrations");
         std::fs::create_dir(&migration_directory).unwrap();
-        std::fs::write(
-            migration_directory.join("0001_maintenance.sql"),
-            include_str!("../migrations/0001_maintenance.sql"),
-        )
-        .unwrap();
+        for (name, sql) in [
+            (
+                "0001_maintenance.sql",
+                include_str!("../migrations/0001_maintenance.sql"),
+            ),
+            (
+                "0002_reorders.sql",
+                include_str!("../migrations/0002_reorders.sql"),
+            ),
+        ] {
+            std::fs::write(migration_directory.join(name), sql).unwrap();
+        }
         let database = directory.path().join("upgrade.sqlite3");
         let pool = SqlitePoolOptions::new()
             .connect_with(
@@ -1237,87 +1614,214 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        let old = Store { pool };
         let seed: ImportCatalog =
             serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
-        let mut input = seed.items[0].clone();
-        input.definition.reorder_url = Some("https://example.invalid/replacement".into());
+        let input = seed.items[0].clone();
         let actor = Actor::System {
             id: SystemActor::Owner,
             name: "Owner credential".into(),
         };
-        let original = old
-            .create(input.clone(), &actor, "before-upgrade-create")
+        let mut original = Item {
+            id: input.id.clone(),
+            definition: input.definition.clone(),
+            revision: 1,
+            archived: false,
+            status: ItemStatus::NeedsAction,
+            source: None,
+            occurrence: Occurrence {
+                id: Uuid::now_v7(),
+                due: input.due,
+                checklist: input.definition.checklist_state(&[]),
+            },
+            last_completion: None,
+        };
+        // These transformations construct the actual 0.2 persisted JSON shapes, not a new-schema Store against old tables.
+        let old_definition: String = sqlx::query_scalar(
+            "SELECT json_set(?1,'$.schedule',json_extract(?1,'$.schedule.interval'))",
+        )
+        .bind(serde_json::to_string(&input.definition).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO items(id,definition,revision,occurrence_id,due,checklist) VALUES(?,?,1,?,?,?)").bind(input.id.as_ref()).bind(old_definition).bind(original.occurrence.id.to_string()).bind(input.due.unwrap().to_string()).bind(serde_json::to_string(&original.occurrence.checklist).unwrap()).execute(&pool).await.unwrap();
+        let at = parse_time("2025-02-03T04:05:06Z").unwrap();
+        if original.occurrence.checklist.is_empty() {
+            original
+                .definition
+                .checklist
+                .push(crate::models::ChecklistStep {
+                    id: Uuid::from_u128(1),
+                    summary: "Inspect example".into(),
+                });
+            original.occurrence.checklist = original.definition.checklist_state(&[]);
+        }
+        let step_id = original.occurrence.checklist[0].id;
+        let mut checked = original.clone();
+        checked.revision = 2;
+        checked.occurrence.checklist[0].completion = Some(StepCompletion {
+            completed_at: at,
+            actor: actor.clone(),
+        });
+        let event = Completion {
+            id: Uuid::now_v7(),
+            item_id: input.id.clone(),
+            occurrence_id: Some(original.occurrence.id),
+            completed_at: Some(at),
+            actor: Some(actor.clone()),
+            previous_due: input.due,
+            next_due: Some(NaiveDate::from_ymd_opt(2031, 4, 5).unwrap()),
+            checklist: checked.occurrence.checklist.clone(),
+            source: None,
+        };
+        let sequence = sqlx::query(COMPLETION_INSERT)
+            .bind(event.id.to_string())
+            .bind(input.id.as_ref())
+            .bind(original.occurrence.id.to_string())
+            .bind(at.to_rfc3339())
+            .bind(serde_json::to_string(&actor).unwrap())
+            .bind(event.previous_due.unwrap().to_string())
+            .bind(event.next_due.unwrap().to_string())
+            .bind(serde_json::to_string(&event.checklist).unwrap())
+            .execute(&pool)
             .await
-            .unwrap();
+            .unwrap()
+            .last_insert_rowid();
+        let mut completed = checked.clone();
+        completed.revision = 3;
+        completed.occurrence = Occurrence {
+            id: Uuid::now_v7(),
+            due: event.next_due,
+            checklist: Vec::<ChecklistStepState>::new(),
+        };
+        completed.last_completion = Some(event);
+        sqlx::query("UPDATE items SET revision=3,occurrence_id=?,due=?,checklist=?,last_completion_id=? WHERE id=?").bind(completed.occurrence.id.to_string()).bind(completed.occurrence.due.unwrap().to_string()).bind("[]").bind(sequence).bind(input.id.as_ref()).execute(&pool).await.unwrap();
         let completion = CompleteItem {
             occurrence_id: original.occurrence.id,
         };
-        let completed = old
-            .complete(
-                &original.id,
-                original.revision,
-                completion.clone(),
-                &actor,
-                "before-upgrade-completion",
-            )
+        let check = SetChecklistStep {
+            occurrence_id: original.occurrence.id,
+            completed: true,
+        };
+        for (key, hash, item) in [
+            ("old-create", create_fingerprint(&input).unwrap(), &original),
+            (
+                "old-check",
+                fingerprint("checklist", &(&original.id, step_id, 1_i64, &check)).unwrap(),
+                &checked,
+            ),
+            (
+                "old-complete",
+                fingerprint("complete", &(&original.id, 2_i64, &completion)).unwrap(),
+                &completed,
+            ),
+        ] {
+            let response:String=sqlx::query_scalar("SELECT json_remove(json_set(?1,'$.schedule',json_extract(?1,'$.schedule.interval')),'$.status','$.source','$.last_completion.source')").bind(serde_json::to_string(item).unwrap()).fetch_one(&pool).await.unwrap();
+            sqlx::query(IDEMPOTENCY_INSERT)
+                .bind(actor.key())
+                .bind(key)
+                .bind(hash)
+                .bind(response)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let reorder = ReorderReceipt {
+            id: Uuid::now_v7(),
+            item_id: original.id.clone(),
+            item_revision: 3,
+            requested_at: at,
+            actor: actor.clone(),
+            item: ReorderContent {
+                name: input.definition.name.clone(),
+                summary: input.definition.summary.clone(),
+                description: input.definition.description.clone(),
+                specs: vec![],
+                resources: vec![],
+                reorder_url: "https://example.invalid/part".into(),
+            },
+        };
+        let reorder_json = serde_json::to_string(&reorder).unwrap();
+        sqlx::query(REORDER_INSERT)
+            .bind(reorder.id.to_string())
+            .bind(&reorder_json)
+            .execute(&pool)
             .await
             .unwrap();
-        let migration_count: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
-            .fetch_one(old.pool())
+        sqlx::query(IDEMPOTENCY_INSERT)
+            .bind(actor.key())
+            .bind("old-reorder")
+            .bind(fingerprint("reorder", &(&original.id, 3_i64, &ReorderItem::default())).unwrap())
+            .bind(&reorder_json)
+            .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(migration_count, 1);
-        old.close().await.unwrap();
+        pool.close().await;
         let upgraded = Store::open(&database).await.unwrap();
-        let current = upgraded.get(&original.id).await.unwrap();
-        assert_eq!(
-            serde_json::to_vec(&current).unwrap(),
-            serde_json::to_vec(&completed).unwrap()
-        );
-        let replay = upgraded
-            .complete(
-                &original.id,
-                original.revision,
-                completion,
-                &actor,
-                "before-upgrade-completion",
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&replay).unwrap(),
-            serde_json::to_vec(&completed).unwrap()
-        );
-        let create_replay = upgraded
-            .create(input, &actor, "before-upgrade-create")
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&create_replay).unwrap(),
-            serde_json::to_vec(&original).unwrap()
-        );
+        let current = upgraded.get(&input.id).await.unwrap();
+        assert_eq!(current.occurrence.id, completed.occurrence.id);
+        assert_eq!(current.occurrence.due, completed.occurrence.due);
+        assert_eq!(current.definition.schedule, input.definition.schedule);
         assert_eq!(
             upgraded
-                .events(&current.id, None, 100)
+                .events(&input.id, None, 100)
                 .await
                 .unwrap()
                 .items
                 .len(),
             1
         );
-        let receipt = upgraded
-            .reorder(
-                &current.id,
-                current.revision,
-                ReorderItem::default(),
-                &actor,
-                "after-upgrade-reorder",
+        assert_eq!(
+            serde_json::to_vec(
+                &upgraded
+                    .create(input.clone(), &actor, "old-create")
+                    .await
+                    .unwrap()
             )
-            .await
-            .unwrap();
-        assert_eq!(receipt.item_id, current.id);
-        assert_eq!(upgraded.summary().await.unwrap().completed, 1);
+            .unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(
+                &upgraded
+                    .set_checklist_step(&original.id, step_id, 1, check, &actor, "old-check")
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_vec(&checked).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(
+                &upgraded
+                    .complete(&original.id, 2, completion, &actor, "old-complete")
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::to_vec(&completed).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(
+                &upgraded
+                    .reorder(
+                        &original.id,
+                        3,
+                        ReorderItem::default(),
+                        &actor,
+                        "old-reorder"
+                    )
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            reorder_json
+        );
+        let foreign_keys: Vec<(String, i64, String, i64)> =
+            sqlx::query_as("PRAGMA foreign_key_check")
+                .fetch_all(upgraded.pool())
+                .await
+                .unwrap();
+        assert!(foreign_keys.is_empty());
         upgraded.close().await.unwrap();
     }
     #[tokio::test]
@@ -1502,14 +2006,14 @@ mod tests {
                         &id,
                         item.revision,
                         crate::models::UpdateItem {
-                            due: crate::models::Change(Some(
+                            due: crate::models::Change(Some(Some(
                                 NaiveDate::from_ymd_opt(
                                     if index % 2 == 0 { 2030 } else { 2032 },
                                     1,
                                     1,
                                 )
                                 .unwrap(),
-                            )),
+                            ))),
                             ..Default::default()
                         },
                     )
@@ -1522,5 +2026,324 @@ mod tests {
         }
         mutations.await.unwrap();
         store.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn migration_queries_use_indexed_batch_lookups_and_upgrade_null_safe_ordering() {
+        use crate::models::{ImportedCompletion, MigrationItem, SourceRef};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("migration-plans.sqlite3"))
+            .await
+            .unwrap();
+        let seed: ImportCatalog =
+            serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
+        let actor = Actor::System {
+            id: SystemActor::Owner,
+            name: "Owner credential".into(),
+        };
+        let legacy = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/0001_maintenance.sql"))
+            .execute(&legacy)
+            .await
+            .unwrap();
+        for batch in 0..4 {
+            let mut items = Vec::new();
+            for index in 0..200 {
+                let mut input = seed.items[0].clone();
+                input.id = format!("example-plan-{batch}-{index:03}")
+                    .try_into()
+                    .unwrap();
+                input.due = if index % 4 == 0 {
+                    None
+                } else {
+                    Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap())
+                };
+                let source = SourceRef {
+                    system: "example-source".into(),
+                    collection: "example-list".into(),
+                    id: format!("item-{batch}-{index}"),
+                };
+                let event_source = SourceRef {
+                    system: "example-source".into(),
+                    collection: "example-history".into(),
+                    id: format!("event-{batch}-{index}"),
+                };
+                items.push(MigrationItem {
+                    source,
+                    item: input.clone(),
+                    status: if index % 3 == 0 {
+                        ItemStatus::Completed
+                    } else {
+                        ItemStatus::NeedsAction
+                    },
+                    archived: index % 5 == 0,
+                    history: vec![ImportedCompletion {
+                        source: Some(event_source),
+                        ..Default::default()
+                    }],
+                });
+                sqlx::query("INSERT INTO items(id,definition,revision,archived,occurrence_id,due,checklist) VALUES(?,?,1,?,?,?,?)")
+                    .bind(input.id.as_ref()).bind(serde_json::to_string(&input.definition).unwrap()).bind(index%5==0).bind(Uuid::now_v7().to_string())
+                    .bind(input.due.unwrap_or_else(|| NaiveDate::from_ymd_opt(2031,1,1).unwrap()).to_string()).bind("[]").execute(&legacy).await.unwrap();
+            }
+            store
+                .migrate(Migration { items }, &actor, &format!("seed-{batch}"))
+                .await
+                .unwrap();
+        }
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+        sqlx::query("ANALYZE").execute(&legacy).await.unwrap();
+        enum Parameter {
+            Text(String),
+            Integer(i64),
+            Blob(Vec<u8>),
+        }
+        use Parameter::{Blob, Integer, Text};
+        let source = serde_json::to_string(&SourceRef {
+            system: "example-source".into(),
+            collection: "example-list".into(),
+            id: "item-0-001".into(),
+        })
+        .unwrap();
+        let event_source = serde_json::to_string(&SourceRef {
+            system: "example-source".into(),
+            collection: "example-history".into(),
+            id: "event-0-001".into(),
+        })
+        .unwrap();
+        let id: ItemId = "example-plan-0-001".to_owned().try_into().unwrap();
+        let item = store.get(&id).await.unwrap();
+        let event = item.last_completion.as_ref().unwrap();
+        let receipt = MigrationReport {
+            items: vec![],
+            applicable: true,
+        };
+        let queries = [
+            (
+                "migration source mappings",
+                MIGRATION_SOURCES,
+                vec![Text(serde_json::to_string(&[&source]).unwrap())],
+            ),
+            (
+                "migration target ids",
+                MIGRATION_TARGETS,
+                vec![Text(serde_json::to_string(&[id.as_ref()]).unwrap())],
+            ),
+            (
+                "migration event ids",
+                MIGRATION_EVENT_IDS,
+                vec![Text(
+                    serde_json::to_string(&[event.id.to_string()]).unwrap(),
+                )],
+            ),
+            (
+                "migration live and historical occurrences",
+                MIGRATION_OCCURRENCES,
+                vec![Text(
+                    serde_json::to_string(&[item.occurrence.id.to_string()]).unwrap(),
+                )],
+            ),
+            (
+                "migration event sources",
+                MIGRATION_EVENT_SOURCES,
+                vec![Text(serde_json::to_string(&[&event_source]).unwrap())],
+            ),
+            (
+                "migration source insertion",
+                MIGRATION_SOURCE_INSERT,
+                vec![
+                    Text(source.clone()),
+                    Text("example-new-plan".into()),
+                    Blob(vec![0; 32]),
+                ],
+            ),
+            (
+                "migration item state",
+                MIGRATION_ITEM_UPDATE,
+                vec![
+                    Text("completed".into()),
+                    Integer(0),
+                    Text(source.clone()),
+                    Text(source),
+                    Integer(1),
+                    Text(id.as_ref().into()),
+                ],
+            ),
+            (
+                "migration history insertion",
+                MIGRATION_EVENT_INSERT,
+                vec![
+                    Text(Uuid::now_v7().to_string()),
+                    Text(id.as_ref().into()),
+                    Text(Uuid::now_v7().to_string()),
+                    Text("2025-02-03T04:05:06Z".into()),
+                    Text(serde_json::to_string(&actor).unwrap()),
+                    Text("2031-01-01".into()),
+                    Text("2031-02-01".into()),
+                    Text("[]".into()),
+                    Text(event_source.clone()),
+                    Text(event_source),
+                ],
+            ),
+            (
+                "migration receipt insertion",
+                IDEMPOTENCY_INSERT,
+                vec![
+                    Text(actor.key()),
+                    Text("plan-migration-receipt".into()),
+                    Blob(vec![0; 32]),
+                    Text(serde_json::to_string(&receipt).unwrap()),
+                ],
+            ),
+        ];
+        let mut evidence = Vec::new();
+        for (name, query, parameters) in queries {
+            let mut details = Vec::new();
+            for prefix in ["EXPLAIN QUERY PLAN ", "EXPLAIN "] {
+                let mut builder = QueryBuilder::<Sqlite>::new(prefix);
+                builder.push(query);
+                let mut statement = builder.build();
+                for parameter in &parameters {
+                    statement = match parameter {
+                        Text(value) => statement.bind(value),
+                        Integer(value) => statement.bind(value),
+                        Blob(value) => statement.bind(value),
+                    };
+                }
+                let rows = statement.fetch_all(store.pool()).await.unwrap();
+                if prefix == "EXPLAIN QUERY PLAN " {
+                    details = rows
+                        .iter()
+                        .map(|row| row.get::<String, _>("detail"))
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !details.iter().any(|line| line.contains("SCAN items")
+                            || line.contains("SCAN completions")
+                            || line.contains("SCAN migration_sources")
+                            || line.contains("TEMP B-TREE")),
+                        "{name}: {details:?}"
+                    );
+                    if !name.ends_with("insertion") {
+                        assert!(
+                            details.iter().any(|line| line.starts_with("SEARCH")),
+                            "{name}: {details:?}"
+                        );
+                    }
+                } else {
+                    assert!(!rows.is_empty());
+                    details.push(format!(
+                        "{} SQLite VM instructions, representative bindings",
+                        rows.len()
+                    ));
+                }
+            }
+            evidence.push((name, details));
+        }
+        // These are the exact 0.2 ordering queries; compare their real plans on
+        // the old schema with the production null-safe queries on the new one.
+        const OLD_SELECT: &str = "SELECT i.id,i.definition,i.revision,i.archived,i.occurrence_id,i.due,i.checklist,c.id AS completion_id,c.occurrence_id AS completed_occurrence,c.completed_at,c.actor,c.previous_due,c.next_due,c.checklist AS completion_checklist FROM items i LEFT JOIN completions c ON c.sequence=i.last_completion_id";
+        const OLD_SUMMARY_FIRST: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 ORDER BY due,id LIMIT 200";
+        const OLD_SUMMARY_NEXT: &str = "SELECT id,json_extract(definition,'$.timezone') AS timezone,due FROM items WHERE archived=0 AND (due,id)>(?,?) ORDER BY due,id LIMIT 200";
+        for (name, new, old_suffix, summary, parameters) in [
+            (
+                "item first page",
+                ITEM_LIST,
+                " WHERE i.archived=? ORDER BY i.due,i.id LIMIT ?",
+                false,
+                vec![Integer(0), Integer(101)],
+            ),
+            (
+                "item continuation",
+                ITEM_LIST_NEXT,
+                " WHERE i.archived=? AND (i.due,i.id)>(?,?) ORDER BY i.due,i.id LIMIT ?",
+                false,
+                vec![
+                    Integer(0),
+                    Text("2031-06-15".into()),
+                    Text("example-plan-0-100".into()),
+                    Integer(101),
+                ],
+            ),
+            (
+                "summary first page",
+                SUMMARY_FIRST,
+                OLD_SUMMARY_FIRST,
+                true,
+                vec![],
+            ),
+            (
+                "summary continuation",
+                SUMMARY_NEXT,
+                OLD_SUMMARY_NEXT,
+                true,
+                vec![Text("2031-06-15".into()), Text("example-plan-0-100".into())],
+            ),
+        ] {
+            for (phase, pool) in [("before", &legacy), ("after", store.pool())] {
+                let mut builder = QueryBuilder::<Sqlite>::new("EXPLAIN QUERY PLAN ");
+                if phase == "after" {
+                    builder.push(new);
+                } else if summary {
+                    builder.push(old_suffix);
+                } else {
+                    builder.push(OLD_SELECT).push(old_suffix);
+                }
+                let mut statement = builder.build();
+                for parameter in &parameters {
+                    statement = match parameter {
+                        Text(value) => statement.bind(value),
+                        Integer(value) => statement.bind(value),
+                        Blob(value) => statement.bind(value),
+                    };
+                }
+                let rows = statement.fetch_all(pool).await.unwrap();
+                let details = rows
+                    .iter()
+                    .map(|row| row.get::<String, _>("detail"))
+                    .collect::<Vec<_>>();
+                assert!(
+                    !details.iter().any(|line| line.contains("TEMP B-TREE")),
+                    "{name} {phase}: {details:?}"
+                );
+                assert!(
+                    details
+                        .iter()
+                        .any(|line| line.contains(if summary && phase == "after" {
+                            "items_active_due"
+                        } else {
+                            "items_due"
+                        })),
+                    "{name} {phase}: {details:?}"
+                );
+                evidence.push((
+                    if phase == "before" {
+                        match name {
+                            "item first page" => "before item first page",
+                            "item continuation" => "before item continuation",
+                            "summary first page" => "before summary first page",
+                            _ => "before summary continuation",
+                        }
+                    } else {
+                        match name {
+                            "item first page" => "after item first page",
+                            "item continuation" => "after item continuation",
+                            "summary first page" => "after summary first page",
+                            _ => "after summary continuation",
+                        }
+                    },
+                    details,
+                ));
+            }
+        }
+        let report = serde_json::to_string_pretty(&evidence).unwrap();
+        println!("{report}");
+        if let Ok(path) = std::env::var("MAINTENANCE_MIGRATION_QUERY_PLAN_OUTPUT") {
+            std::fs::write(path, report).unwrap();
+        }
+        store.close().await.unwrap();
+        legacy.close().await;
     }
 }

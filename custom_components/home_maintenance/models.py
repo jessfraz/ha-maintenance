@@ -9,6 +9,13 @@ from uuid import UUID
 ITEM_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
+class ItemStatus(StrEnum):
+    """Whether the backend-owned current occurrence still needs action."""
+
+    NEEDS_ACTION = "needs_action"
+    COMPLETED = "completed"
+
+
 class ActorKind(StrEnum):
     """Backend-owned attribution kinds."""
 
@@ -92,7 +99,7 @@ class ChecklistStep:
 
 @dataclass(frozen=True, slots=True)
 class MaintenanceItem:
-    """One backend-owned task and its current scheduled occurrence."""
+    """One backend-owned task and its current occurrence."""
 
     id: str
     name: str
@@ -101,8 +108,10 @@ class MaintenanceItem:
     location: str | None
     revision: int
     archived: bool
+    status: ItemStatus
+    completed_at: datetime | None
     occurrence_id: UUID
-    due: date
+    due: date | None
     instructions: tuple[str, ...]
     checklist: tuple[ChecklistStep, ...]
 
@@ -143,6 +152,7 @@ class MaintenanceItem:
         location = value.get("location")
         revision = value.get("revision")
         archived = value.get("archived")
+        status = value.get("status")
         occurrence = value.get("occurrence")
         instructions = value.get("instructions")
         if (
@@ -157,24 +167,43 @@ class MaintenanceItem:
             or type(revision) is not int
             or revision < 1
             or type(archived) is not bool
+            or not isinstance(status, str)
             or not isinstance(occurrence, dict)
             or not isinstance(instructions, list)
             or not all(isinstance(line, str) for line in instructions)
         ):
             raise ValueError("Invalid item")
+        completed_at = None
+        last_completion = value.get("last_completion")
+        if last_completion is not None:
+            if not isinstance(last_completion, dict):
+                raise ValueError("Invalid last completion")
+            timestamp = last_completion.get("completed_at")
+            if timestamp is not None:
+                if not isinstance(timestamp, str):
+                    raise ValueError("Invalid completion timestamp")
+                completed_at = datetime.fromisoformat(timestamp)
+                if completed_at.utcoffset() != timedelta(0):
+                    raise ValueError("Completion timestamp must be UTC")
         occurrence_id = occurrence.get("id")
         due = occurrence.get("due")
         checklist = occurrence.get("checklist")
-        if not isinstance(occurrence_id, str) or not isinstance(due, str):
+        if (
+            not isinstance(occurrence_id, str)
+            or "due" not in occurrence
+            or (due is not None and not isinstance(due, str))
+        ):
             raise ValueError("Invalid occurrence")
         if not isinstance(checklist, list):
             raise ValueError("Invalid occurrence checklist")
         steps = tuple(ChecklistStep.parse(record) for record in checklist)
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("Duplicate occurrence checklist step")
-        due_date = date.fromisoformat(due)
+        due_date = date.fromisoformat(due) if due is not None else None
         # All-day calendar events need a following date for their exclusive end.
-        if due_date.isoformat() != due or due_date == date.max:
+        if due_date is not None and (
+            due_date.isoformat() != due or due_date == date.max
+        ):
             raise ValueError("Invalid occurrence date")
         return cls(
             item_id,
@@ -184,6 +213,8 @@ class MaintenanceItem:
             location,
             revision,
             archived,
+            ItemStatus(status),
+            completed_at,
             UUID(occurrence_id),
             due_date,
             tuple(instructions),

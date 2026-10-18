@@ -27,6 +27,7 @@ from .conftest import (
     OCCURRENCE_ID,
     SUMMARY,
     Backend,
+    entity_items,
     item_record,
 )
 
@@ -428,3 +429,75 @@ async def test_concurrent_native_completions_keep_each_users_identity(
         f"/v1/items/{ITEM_ID}/completions": f"ha:{hass_user.id}",
         "/v1/items/second-filter/completions": f"ha:{hass_admin_user.id}",
     }
+
+
+@pytest.mark.parametrize(
+    ("completed", "due"),
+    [(False, None), (True, None), (True, "2026-10-15")],
+    ids=["undated-active", "undated-completed", "dated-completed"],
+)
+async def test_undated_tasks_preserve_native_status_without_inventing_dates(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    completed: bool,
+    due: str | None,
+) -> None:
+    """Unknown dates remain absent in HA, including completed one-off tasks."""
+    status = "completed" if completed else "needs_action"
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps(
+            {
+                "items": [item_record(due=due, status=status)],
+                "next_page": None,
+            }
+        ).encode(),
+        {},
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == ("0" if completed else "1")
+    result = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    items = entity_items(result, "todo.maintenance")
+    assert len(items) == 1
+    assert items[0]["status"] == status
+    assert items[0]["uid"] == OCCURRENCE_ID
+    if due is None:
+        assert "due" not in items[0]
+    else:
+        assert items[0]["due"] == due
+    calendar = await hass.services.async_call(
+        "calendar",
+        "get_events",
+        {
+            "entity_id": "calendar.maintenance",
+            "start_date_time": "2026-01-01T00:00:00Z",
+            "end_date_time": "2027-01-01T00:00:00Z",
+        },
+        blocking=True,
+        return_response=True,
+    )
+    assert entity_items(calendar, "calendar.maintenance", "events") == []
+    if completed:
+        before = len(backend.requests)
+        with pytest.raises(ServiceValidationError, match="no longer active"):
+            await hass.services.async_call(
+                "todo",
+                "update_item",
+                {
+                    "entity_id": "todo.maintenance",
+                    "item": OCCURRENCE_ID,
+                    "status": "completed",
+                },
+                blocking=True,
+            )
+        assert len(backend.requests) == before

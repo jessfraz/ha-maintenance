@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Optional due dates and explicit one-off, standing, and recurring task types.
+- Completed tasks retain their status and known completion timestamps in Home Assistant; calendars show active, dated work only.
+- Migration preview reports source mappings and conflicts without writing data. Atomic import preserves source IDs, completion history, and unknown historical facts.
+- Existing SQLite state and retry receipts survive the schema upgrade.
+- Update the Docker example and check its version in CI.
+
 ## 0.2.0
 
 - Durable reorder requests with frozen item details and actor-scoped retry receipts.

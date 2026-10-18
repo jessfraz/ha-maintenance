@@ -134,6 +134,17 @@ class Completion(TypedDict):
     checklist: list[Step]
 
 
+class Interval(TypedDict):
+    days: int
+    months: int
+    years: int
+
+
+class RecurringSchedule(TypedDict):
+    kind: Literal["recurring"]
+    interval: Interval
+
+
 class Item(TypedDict):
     id: str
     name: str
@@ -141,7 +152,7 @@ class Item(TypedDict):
     description: str | None
     archived: bool
     timezone: str
-    schedule: dict[str, int]
+    schedule: RecurringSchedule
     occurrence: Occurrence
     last_completion: Completion | None
 
@@ -166,7 +177,9 @@ assert item["name"] == "Example filter"
 assert item["summary"] == "Replace the example filter"
 assert item["description"] == "Example task with a partial checklist."
 assert item["timezone"] == "Etc/UTC" and item["archived"] is False
-assert item["schedule"] == {"days": 47, "months": 0, "years": 0}
+assert item["schedule"] == {
+    "kind": "recurring", "interval": {"days": 47, "months": 0, "years": 0}
+}
 assert str(UUID(item["occurrence"]["id"])) == item["occurrence"]["id"]
 steps = item["occurrence"]["checklist"]
 assert [(step["id"], step["summary"]) for step in steps] == [
@@ -281,7 +294,7 @@ request POST /v1/items 201 \
     --header "Authorization: Bearer $token" \
     --header 'Content-Type: application/json' \
     --header 'Idempotency-Key: smoke-create-filter' \
-    --data "{\"id\":\"example-filter\",\"name\":\"Example filter\",\"summary\":\"Replace the example filter\",\"description\":\"Example task with a partial checklist.\",\"timezone\":\"Etc/UTC\",\"due\":\"2031-02-17\",\"schedule\":{\"days\":47,\"months\":0,\"years\":0},\"checklist\":[{\"id\":\"$step_id\",\"summary\":\"Inspect the example filter\"},{\"id\":\"$other_step_id\",\"summary\":\"Fit the example replacement\"}],\"reorder_url\":\"https://example.com/filter\"}"
+    --data "{\"id\":\"example-filter\",\"name\":\"Example filter\",\"summary\":\"Replace the example filter\",\"description\":\"Example task with a partial checklist.\",\"timezone\":\"Etc/UTC\",\"due\":\"2031-02-17\",\"schedule\":{\"kind\":\"recurring\",\"interval\":{\"days\":47,\"months\":0,\"years\":0}},\"checklist\":[{\"id\":\"$step_id\",\"summary\":\"Inspect the example filter\"},{\"id\":\"$other_step_id\",\"summary\":\"Fit the example replacement\"}],\"reorder_url\":\"https://example.com/filter\"}"
 occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
 check_item_contract fresh
 reorder_revision=$(etag)
@@ -462,6 +475,130 @@ request PUT "/v1/items/example-filter/checklist/$other_step_id" 200 \
 check_item_contract reset
 request GET /v1/items/example-filter/events 200 --header "Authorization: Bearer $token"
 check_item_contract history
+
+# Migration preserves unknown facts rather than inventing dates or actors.
+# Keep this fixture separate from the preceding backup and checklist contracts.
+cat > "$scratch/migration.json" <<'JSON'
+{
+  "items": [
+    {
+      "source": {"system":"example-source","collection":"example-list","id":"Once / AbC"},
+      "item": {"id":"example-migrated-once","name":"Example once","summary":"Inspect the example item","timezone":"Etc/UTC","due":null,"schedule":{"kind":"once"}},
+      "status":"needs_action"
+    },
+    {
+      "source": {"system":"example-source","collection":"example-list","id":"Standing / DeF"},
+      "item": {"id":"example-migrated-standing","name":"Example standing","summary":"Inspect whenever needed","timezone":"Etc/UTC","due":null,"schedule":{"kind":"standing"}},
+      "status":"needs_action"
+    },
+    {
+      "source": {"system":"example-source","collection":"example-list","id":"Completed / GhI"},
+      "item": {"id":"example-migrated-completed","name":"Example completed","summary":"A previously completed example","timezone":"Etc/UTC","due":null,"schedule":{"kind":"once"}},
+      "status":"completed",
+      "history":[{
+        "id":"40000000-0000-4000-8000-000000000001",
+        "source":{"system":"example-source","collection":"example-history","id":"Event / JkL"},
+        "completed_at":"2030-02-03T04:05:06Z",
+        "actor":null
+      }]
+    }
+  ]
+}
+JSON
+request POST /v1/migrations/preview 403 \
+    --header "Authorization: Bearer $integration_token" \
+    --header 'X-Maintenance-System-Actor: ha:integration' \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$scratch/migration.json"
+request POST /v1/migrations/preview 400 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --data '{"items":[],"unexpected":true}'
+request POST /v1/migrations/preview 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$scratch/migration.json"
+jq --exit-status --slurpfile input "$scratch/migration.json" \
+    '.applicable == true and (.items | length) == 3
+     and ([.items[].source] == [$input[0].items[].source])
+     and ([.items[].target_id] == [$input[0].items[].item.id])
+     and all(.items[]; .action == "created" and .conflicts == [])
+     and [.items[].history_events] == [0,0,1]' "$scratch/response.json" >/dev/null
+cp "$scratch/response.json" "$scratch/migration-preview.json"
+# An occupied target is reported without changing it or creating other items.
+jq '.items[0].item.id = "example-filter"' "$scratch/migration.json" > "$scratch/migration-conflict.json"
+request POST /v1/migrations/preview 200 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$scratch/migration-conflict.json"
+jq --exit-status '.applicable == false and .items[0].action == "conflict"
+    and (.items[0].conflicts | length) > 0' "$scratch/response.json" >/dev/null
+for id in example-migrated-once example-migrated-standing example-migrated-completed; do
+    request GET "/v1/items/$id" 404 --header "Authorization: Bearer $token"
+done
+request POST /v1/migrations 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-migration' \
+    --data-binary "@$scratch/migration.json"
+cmp --silent "$scratch/migration-preview.json" "$scratch/response.json"
+cp "$scratch/response.json" "$scratch/migration-receipt.json"
+for kind in once standing completed; do
+    request GET "/v1/items/example-migrated-$kind" 200 --header "Authorization: Bearer $token"
+    jq --exit-status --arg id "example-migrated-$kind" --slurpfile input "$scratch/migration.json" \
+        '. as $item | ($input[0].items[] | select(.item.id == $id)) as $source
+         | $item.source == $source.source and $item.status == $source.status
+         and $item.schedule == $source.item.schedule and $item.occurrence.due == null' \
+        "$scratch/response.json" >/dev/null
+done
+request GET /v1/items/example-migrated-completed/events 200 --header "Authorization: Bearer $token"
+jq --exit-status --slurpfile input "$scratch/migration.json" \
+    '.next_page == null and (.items | length) == 1
+     and .items[0].id == $input[0].items[2].history[0].id
+     and .items[0].source == $input[0].items[2].history[0].source
+     and .items[0].completed_at == "2030-02-03T04:05:06Z"
+     and .items[0].actor == null and .items[0].occurrence_id == null
+     and .items[0].previous_due == null and .items[0].next_due == null' "$scratch/response.json" >/dev/null
+cp "$scratch/response.json" "$scratch/migration-history.json"
+# Once closes its existing occurrence; standing opens a new undated occurrence.
+for kind in once standing; do
+    request GET "/v1/items/example-migrated-$kind" 200 --header "Authorization: Bearer $token"
+    migration_occurrence=$(jq --exit-status --raw-output '.occurrence.id' "$scratch/response.json")
+    migration_revision=$(etag)
+    migration_body=$(jq --compact-output --null-input --arg occurrence "$migration_occurrence" '{occurrence_id:$occurrence}')
+    request POST "/v1/items/example-migrated-$kind/completions" 200 \
+        --header "Authorization: Bearer $token" \
+        --header 'Content-Type: application/json' \
+        --header "Idempotency-Key: smoke-migration-complete-$kind" \
+        --header "If-Match: $migration_revision" --data "$migration_body"
+    jq --exit-status --arg kind "$kind" --arg occurrence "$migration_occurrence" \
+        '.occurrence.due == null and .last_completion.previous_due == null
+         and .last_completion.next_due == null
+         and .last_completion.occurrence_id == $occurrence
+         and (if $kind == "once" then .status == "completed" and .occurrence.id == $occurrence
+              else .status == "needs_action" and .occurrence.id != $occurrence end)' \
+        "$scratch/response.json" >/dev/null
+done
+for kind in once standing completed; do
+    request GET "/v1/items/example-migrated-$kind" 200 --header "Authorization: Bearer $token"
+    cp "$scratch/response.json" "$scratch/migrated-$kind.json"
+done
+stop_container
+start_container
+# Replaying the original import must retain the original receipt without
+# resetting completed work or appending a duplicate historical event.
+request POST /v1/migrations 201 \
+    --header "Authorization: Bearer $token" \
+    --header 'Content-Type: application/json' \
+    --header 'Idempotency-Key: smoke-migration' \
+    --data-binary "@$scratch/migration.json"
+cmp --silent "$scratch/migration-receipt.json" "$scratch/response.json"
+for kind in once standing completed; do
+    request GET "/v1/items/example-migrated-$kind" 200 --header "Authorization: Bearer $token"
+    cmp --silent "$scratch/migrated-$kind.json" "$scratch/response.json"
+done
+request GET /v1/items/example-migrated-completed/events 200 --header "Authorization: Bearer $token"
+cmp --silent "$scratch/migration-history.json" "$scratch/response.json"
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, partial checklists/history/reset, durable reorder receipts/resolution/retries, restart, and cold backup/restore."
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, undated once/standing tasks, restart, and cold backup/restore."

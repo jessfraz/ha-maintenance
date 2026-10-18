@@ -28,15 +28,29 @@ an image has been published.
 ## Maintenance items
 
 Each item has a stable ID, a name for the thing being maintained, an action
-summary, an IANA time zone, a due date, and a calendar recurrence. For example,
+summary, and an IANA time zone. A due date is optional; unknown dates stay
+unknown. For example,
 an item named "Example air filter" has the summary "Replace the example air
 filter". A description, checklist, instructions, specifications, resource
 links, group, and location are optional.
 
+Choose a task type:
+
+- **One-off:** completion closes the task and retains its occurrence and history.
+- **Standing:** completion records the work and starts a fresh, undated occurrence.
+- **Recurring:** completion starts a new occurrence using a positive calendar
+  interval, measured from the actual completion date in the item's time zone.
+
+The API represents these as `{"kind":"once"}`, `{"kind":"standing"}`, or
+`{"kind":"recurring","interval":{"months":3}}` in `schedule`. A newly created
+item defaults to one-off when its schedule is omitted. Omitting `due`, or
+setting it to `null`, does not assign today's date.
+
 Checklist steps belong to the current occurrence. Checking a step records its
 actor and time without completing the item. Explicitly completing the item
 saves a snapshot of its checklist, including unchecked steps, and creates the
-next occurrence with every step unchecked in the same SQLite transaction.
+next occurrence, when the task repeats, with every step unchecked in the same
+SQLite transaction.
 Keeping a template step's ID and wording preserves its current check; changing
 its wording clears that check. Completed history stays unchanged. Calendar
 months and years retain calendar behavior at month boundaries.
@@ -53,15 +67,18 @@ Copy the stable app route, rather than a temporary ingress session URL. Keep
 item IDs stable after writing tags. Archiving an item retains its history.
 
 The integration adds `calendar.maintenance` for calendar cards and calendar
-automations. Each active task appears as an all-day event on its current due
+automations. Each active, dated task appears as an all-day event on its current due
 date, with its summary, description, instructions, checklist progress, and
 location. Dates stay on the same calendar day in Home Assistant's time zone,
-including daylight-saving changes. Archived tasks are excluded.
+including daylight-saving changes. Undated, completed, and archived tasks are
+excluded. The native to-do list retains undated tasks and completed tasks,
+including a completion timestamp when one is known.
 Due dates range from `0001-01-01` through `9999-12-30`, leaving a representable
 following day for each event's exclusive end.
 
 The calendar is read-only. Complete work through the to-do list, dashboard,
-or integration actions; the next due date then replaces the completed event.
+or integration actions. A one-off event disappears after completion; a dated
+recurring successor replaces it. Standing tasks remain undated after completion.
 Only the current occurrence appears because recurrence starts from actual
 completion. Overdue dates stay in the past, while the to-do list and overdue
 sensor continue to show unfinished work. The calendar shares the integration's
@@ -77,6 +94,8 @@ OpenAPI document with `just openapi`.
 | Readiness | `GET /health` |
 | List or create items | `GET /v1/items`, `POST /v1/items` |
 | Import a catalog atomically | `POST /v1/imports` |
+| Preview a migration mapping and conflicts | `POST /v1/migrations/preview` |
+| Apply a migration atomically | `POST /v1/migrations` |
 | Read or update an item | `GET /v1/items/{id}`, `PATCH /v1/items/{id}` |
 | Check or uncheck a current step | `PUT /v1/items/{id}/checklist/{step_id}` |
 | Complete the current occurrence | `POST /v1/items/{id}/completions` |
@@ -107,6 +126,55 @@ fit within 200 UTF-8 bytes. An optional description fits within 16,000 UTF-8
 bytes and must be nonblank when supplied. A checklist defaults to empty and
 supports up to 100 steps, each with a unique UUID that remains stable when
 editing its text.
+
+### Migrating existing tasks
+
+Catalog admission through `/v1/imports` creates new definitions only. Use the
+separate migration endpoints to retain existing task state and history.
+[`config/migration.example.json`](config/migration.example.json) is a fictional
+example of that contract.
+
+Each migration entry supplies a `source` identity with `system`, `collection`,
+and an opaque `id`, plus an `item` in the creation format. Supply the source's
+`status` (`needs_action` or `completed`), optional `archived`, and `history`
+from oldest to newest. Source IDs retain their exact case and contents; they
+are independent of the target item's URL-safe ID. Supplied historical event
+UUIDs and source identities are retained. The service allocates an internal
+event UUID only when none was supplied.
+
+History supports `completed_at`, `actor`, `occurrence_id`, `source`,
+`previous_due`, `next_due`, and checklist snapshots. Unknown timestamps, actors,
+occurrence IDs, source identities, and due dates remain null; checklist snapshots
+default to empty.
+An already-completed task may have no known completion time or historical
+event; its status is preserved without fabricating either. Import never runs
+the recurrence engine or recomputes dates from old completions.
+
+Send the complete proposed mapping to `POST /v1/migrations/preview` using the
+owner bearer credential. The response contains `applicable` and a per-item
+mapping with `source`, `target_id`, `action` (`created`, `unchanged`, or
+`conflict`), `conflicts`, and `history_events`. Preview reads one database
+snapshot and writes no items, history, mappings, or retry receipts. It reports
+duplicate destination IDs, conflicting source mappings, and historical event
+identities that collide with stored history or active occurrences.
+
+After reviewing the mapping, send the same body to `POST /v1/migrations` with
+a stable `Idempotency-Key`. The service checks conflicts again inside the
+write transaction. Any conflict rejects the whole batch with **409**; a
+successful **201** saves the complete mapping, history, and retry receipt
+atomically. Exact retries return the saved report. Repeating an identical
+source mapping under a new key reports `unchanged` and does not overwrite
+later edits or duplicate history. Neither endpoint deletes source tasks.
+These endpoints use the backend API directly; the HA REST bridge does not
+expose administrative migrations.
+
+Review task types explicitly when the source has no recurrence information.
+Matching titles alone do not establish source identity. Do not merge records,
+invent dates, or infer old completion events from current state. This API
+accepts all-day dates; a source containing a due timestamp needs an explicit
+mapping decision before import, rather than truncating its time or time zone.
+Export all available source history separately when the provider's current
+to-do response contains only its latest completion timestamp.
 
 ### Reorder requests
 

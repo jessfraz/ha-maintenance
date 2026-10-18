@@ -149,6 +149,9 @@ function itemPending(item) {
 
 function dueInfo(item) {
   const due = item.occurrence.due;
+  if (item.status === "completed")
+    return { label: "Completed", className: "", days: null };
+  if (!due) return { label: "No due date", className: "undated", days: null };
   const days = Math.round(
     (Date.parse(`${due}T12:00:00Z`) -
       Date.parse(`${today(item.timezone)}T12:00:00Z`)) /
@@ -166,13 +169,18 @@ function dueInfo(item) {
 }
 
 function cadence(schedule) {
-  return ["years", "months", "days"]
-    .filter((unit) => schedule[unit] > 0)
-    .map(
-      (unit) =>
-        `${schedule[unit]} ${schedule[unit] === 1 ? unit.slice(0, -1) : unit}`,
-    )
-    .join(", ");
+  if (schedule.kind === "once") return "One-off";
+  if (schedule.kind === "standing") return "Standing";
+  return (
+    "Every " +
+    ["years", "months", "days"]
+      .filter((unit) => schedule.interval[unit] > 0)
+      .map(
+        (unit) =>
+          `${schedule.interval[unit]} ${schedule.interval[unit] === 1 ? unit.slice(0, -1) : unit}`,
+      )
+      .join(", ")
+  );
 }
 
 function itemPath(id) {
@@ -260,20 +268,26 @@ function renderList() {
       const days = dueInfo(item).days;
       return (
         matches &&
-        (view !== "overdue" || days < 0) &&
-        (view !== "due_soon" || (days >= 0 && days <= 14))
+        (view === "archived" ||
+          (view === "completed"
+            ? item.status === "completed"
+            : item.status === "needs_action")) &&
+        (view !== "overdue" || (days !== null && days < 0)) &&
+        (view !== "due_soon" || (days !== null && days >= 0 && days <= 14))
       );
     })
     .sort(
       (left, right) =>
-        left.occurrence.due.localeCompare(right.occurrence.due) ||
+        (left.occurrence.due ?? "9999-12-31").localeCompare(
+          right.occurrence.due ?? "9999-12-31",
+        ) ||
         left.name.localeCompare(right.name) ||
         left.id.localeCompare(right.id),
     );
   const root = byId("list");
   root.replaceChildren();
   byId("queue-title").textContent =
-    view === "archived" ? "Archived" : "Queue";
+    view === "archived" ? "Archived" : view === "completed" ? "Completed" : "Queue";
   byId("list-status").textContent =
     `${visible.length} ${visible.length === 1 ? "item" : "items"}${query ? ` matching “${byId("query").value.trim()}”` : ""} · earliest due first`;
   if (!visible.length) {
@@ -286,7 +300,7 @@ function renderList() {
           ? "Nothing due in the next two weeks"
           : view === "archived"
             ? "No archived items"
-            : "No items";
+            : view === "completed" ? "No completed items" : "No items";
     const copy = query
       ? "Try a different task, item name, location, or group."
       : view === "active"
@@ -320,7 +334,7 @@ function renderList() {
       element(
         "div",
         [
-          `Every ${cadence(item.schedule)}`,
+          cadence(item.schedule),
           item.occurrence.checklist.length
             ? checklistProgress(item.occurrence.checklist)
             : null,
@@ -339,9 +353,11 @@ function renderList() {
         `badge ${item.archived ? "archived" : info.className}`,
       ),
     );
-    const time = element("time", dateLabel(item.occurrence.due));
-    time.dateTime = item.occurrence.due;
-    due.append(time);
+    if (item.occurrence.due) {
+      const time = element("time", dateLabel(item.occurrence.due));
+      time.dateTime = item.occurrence.due;
+      due.append(time);
+    }
     card.append(content, due);
     root.append(card);
   }
@@ -444,7 +460,11 @@ function renderChecklist(item) {
     input.type = "checkbox";
     input.id = `checklist-${step.id}`;
     input.checked = Boolean(step.completion);
-    input.disabled = item.archived || itemBusy(item) || itemPending(item);
+    input.disabled =
+      item.archived ||
+      item.status === "completed" ||
+      itemBusy(item) ||
+      itemPending(item);
     const text = element("span", undefined, "checklist-step-text");
     const summary = element("span", step.summary);
     summary.id = `checklist-label-${step.id}`;
@@ -536,13 +556,13 @@ function renderDetail() {
   due.append(
     element("span", item.archived ? "ARCHIVED" : "NEXT DUE"),
     element("strong", item.archived ? "Schedule paused" : dueInfo(item).label),
-    element("p", `${dateLabel(item.occurrence.due)} · ${item.timezone}`),
+    element("p", item.occurrence.due
+      ? `${dateLabel(item.occurrence.due)} · ${item.timezone}` : item.timezone),
   );
   const interval = element("div");
   interval.append(
-    element("span", "REPEAT AFTER COMPLETION"),
+    element("span", "SCHEDULE"),
     element("strong", cadence(item.schedule)),
-    element("p", "Calendar cadence"),
   );
   timing.append(due, interval);
   root.append(timing);
@@ -583,7 +603,10 @@ function renderDetail() {
   }
   const actions = byId("actions");
   actions.replaceChildren();
-  if (!item.archived) {
+  if (
+    !item.archived &&
+    (item.status === "needs_action" || completionRequests.has(item.id))
+  ) {
     const pending = completionRequests.get(item.id);
     const changed =
       pending &&
@@ -686,16 +709,19 @@ async function loadEvents(generation = detailGeneration) {
     if (generation !== detailGeneration || selected?.id !== id) return;
     for (const event of page.items) {
       const row = element("li");
-      row.append(element("strong", `Completed by ${actorLabel(event.actor)}`));
-      const time = element("time", timestampLabel(event.completed_at));
-      time.dateTime = event.completed_at;
       row.append(
-        time,
-        element(
-          "p",
-          `Previously due ${dateLabel(event.previous_due)} · next due ${dateLabel(event.next_due)}`,
-        ),
+        element("strong", event.actor ? `Completed by ${actorLabel(event.actor)}` : "Completion"),
       );
+      if (event.completed_at) {
+        const time = element("time", timestampLabel(event.completed_at));
+        time.dateTime = event.completed_at;
+        row.append(time);
+      } else row.append(element("p", "Completion date unknown", "muted"));
+      const dates = [
+        event.previous_due ? `Previously due ${dateLabel(event.previous_due)}` : null,
+        event.next_due ? `Next due ${dateLabel(event.next_due)}` : null,
+      ].filter(Boolean);
+      if (dates.length) row.append(element("p", dates.join(" · ")));
       const checklist = checklistHistory(event.checklist);
       if (checklist) row.append(checklist);
       byId("events").append(row);
@@ -780,12 +806,14 @@ async function completeItem(item) {
     byId("events").replaceChildren();
     await loadEvents();
   }
-  notice(
-    `Maintenance recorded. ${updated.summary} is next due ${dateLabel(updated.occurrence.due)}.`,
-  );
+  const result = updated.status === "completed"
+    ? `${updated.summary} completed.`
+    : updated.occurrence.due
+      ? `${updated.summary} recorded. Next due ${dateLabel(updated.occurrence.due)}.`
+      : `${updated.summary} recorded.`;
+  notice(result);
   if (selected?.id === item.id)
-    byId("detail-status").textContent =
-      `Maintenance recorded. Next due ${dateLabel(updated.occurrence.due)}.`;
+    byId("detail-status").textContent = result;
   await load().catch((error) =>
     notice(
       `Maintenance was recorded, but the queue could not be refreshed. ${errorMessage(error)}`,
@@ -1062,13 +1090,15 @@ function openEditor(item = null) {
     item?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   form.elements.namedItem("timezone").value = timezone;
   form.elements.namedItem("due").value =
-    item?.occurrence.due || today(timezone);
+    item?.occurrence.due || "";
   form.elements.namedItem("instructions").value =
     item?.instructions.join("\n") || "";
   form.elements.namedItem("id").disabled = Boolean(item);
   for (const unit of ["years", "months", "days"])
     form.elements.namedItem(unit).value =
-      item?.schedule[unit] ?? (unit === "days" ? 30 : 0);
+      item?.schedule.interval?.[unit] ?? 0;
+  byId("schedule-kind").value = item?.schedule.kind ?? "once";
+  updateScheduleEditor();
   byId("days").setCustomValidity("");
   for (const spec of item?.specs || [])
     addMetadataRow("spec", spec.label, spec.value);
@@ -1098,13 +1128,14 @@ async function saveItem() {
   if (editorBusy) return;
   const form = byId("edit-form");
   const value = (name) => form.elements.namedItem(name).value.trim();
-  const schedule = {
+  const interval = {
     days: Number(value("days")),
     months: Number(value("months")),
     years: Number(value("years")),
   };
   byId("days").setCustomValidity(
-    Object.values(schedule).some((days) => days > 0)
+    value("schedule-kind") !== "recurring" ||
+      Object.values(interval).some((days) => days > 0)
       ? ""
       : "Choose a repeat interval of at least one day, month, or year.",
   );
@@ -1127,8 +1158,9 @@ async function saveItem() {
     location: value("location") || null,
     group: value("group") || null,
     timezone: value("timezone"),
-    due: value("due"),
-    schedule,
+    due: value("due") || null,
+    schedule: value("schedule-kind") === "recurring"
+      ? { kind: "recurring", interval } : { kind: value("schedule-kind") },
     instructions: value("instructions")
       .split("\n")
       .map((line) => line.trim())
@@ -1272,6 +1304,20 @@ byId("login").addEventListener(
     }
   }),
 );
+function updateScheduleEditor() {
+  const recurring = byId("schedule-kind").value === "recurring";
+  byId("interval-fields").hidden = !recurring;
+  byId("schedule-help").textContent = {
+    once: "Completion closes the task.",
+    standing: "Completion starts another undated occurrence.",
+    recurring: "Repeat after completion using the interval below.",
+  }[byId("schedule-kind").value];
+  for (const unit of ["years", "months", "days"])
+    byId(unit).disabled = !recurring;
+  byId("days").setCustomValidity("");
+}
+
+byId("schedule-kind").addEventListener("change", updateScheduleEditor);
 byId("add").addEventListener("click", () => openEditor());
 byId("refresh").addEventListener(
   "click",

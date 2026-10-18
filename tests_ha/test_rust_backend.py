@@ -17,7 +17,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util.json import JsonObjectType
-from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.home_maintenance.const import (
@@ -30,6 +30,7 @@ from custom_components.home_maintenance.const import (
 from custom_components.home_maintenance.models import (
     ActorKind,
     ChecklistStep,
+    ItemStatus,
     MaintenanceItem,
 )
 
@@ -177,7 +178,10 @@ async def test_ha_to_rust_maintenance_contract(
         "summary": "Replace filter",
         "timezone": "UTC",
         "due": "2025-01-01",
-        "schedule": {"days": 1, "months": 0, "years": 0},
+        "schedule": {
+            "kind": "recurring",
+            "interval": {"days": 1, "months": 0, "years": 0},
+        },
         "instructions": ["Turn off the appliance", "Replace the filter"],
     }
     assert (await user.post(f"{PREFIX}/items", json=definition)).status == 403
@@ -322,7 +326,10 @@ async def test_reorder_receipt_survives_resolution_and_item_changes(
             "summary": "Replace the example filter",
             "timezone": "UTC",
             "due": "2025-01-01",
-            "schedule": {"days": 0, "months": 3, "years": 0},
+            "schedule": {
+                "kind": "recurring",
+                "interval": {"days": 0, "months": 3, "years": 0},
+            },
             "reorder_url": "https://example.com/filter",
             "specs": [{"label": "Size", "value": "Example size"}],
         },
@@ -330,6 +337,7 @@ async def test_reorder_receipt_survives_resolution_and_item_changes(
     )
     assert created.status == 201
     original = MaintenanceItem.parse(await created.json())
+    assert original.due is not None
     headers = {"If-Match": created.headers["ETag"], "Idempotency-Key": "press-one"}
     requested = await user.post(
         f"{PREFIX}/items/{original.id}/reorders", json={}, headers=headers
@@ -479,7 +487,10 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
             "description": "Use the specified replacement and keep the area dry.",
             "timezone": "UTC",
             "due": "2025-01-01",
-            "schedule": {"days": 1, "months": 0, "years": 0},
+            "schedule": {
+                "kind": "recurring",
+                "interval": {"days": 1, "months": 0, "years": 0},
+            },
             "instructions": ["Follow the appliance instructions."],
             "checklist": [
                 {"id": STEP_ID, "summary": "Turn off the appliance"},
@@ -491,6 +502,7 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     assert created.status == 201
     original_etag = created.headers["ETag"]
     original = MaintenanceItem.parse(await created.json())
+    assert original.due is not None
     await entry.runtime_data.async_refresh()
     todo = await hass.services.async_call(
         "todo",
@@ -585,6 +597,7 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
     )
     response = await user.get(f"{PREFIX}/items/{original.id}")
     successor = MaintenanceItem.parse(await response.json())
+    assert successor.due is not None
     assert successor.occurrence_id != original.occurrence_id
     assert successor.due != original.due
     assert tuple(step.id for step in successor.checklist) == tuple(
@@ -624,3 +637,235 @@ async def test_native_checklist_preserves_parent_and_archives_step_progress(
         )
     after_stale = await user.get(f"{PREFIX}/items/{original.id}")
     assert MaintenanceItem.parse(await after_stale.json()) == successor
+
+
+async def test_migrated_undated_completed_and_standing_tasks_remain_faithful_in_ha(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_user: MockUser,
+    hass_user_token: str,
+    rust_backend: RustBackend,
+) -> None:
+    """Imported source facts survive native todo actions without made-up dates."""
+    source = {
+        "system": "home_assistant",
+        "collection": "todo.example",
+        "id": "Original Case-Sensitive UID",
+    }
+    event_source = {**source, "id": "Original Completion UID"}
+    payload = {
+        "items": [
+            {
+                "source": source,
+                "item": {
+                    "id": "finished-example-task",
+                    "name": "Finished example task",
+                    "summary": "Finished example task",
+                    "timezone": "UTC",
+                    "due": None,
+                    "schedule": {"kind": "once"},
+                },
+                "status": "completed",
+                "history": [
+                    {
+                        "source": event_source,
+                        "completed_at": "2025-02-03T04:05:06Z",
+                        "actor": None,
+                        "previous_due": None,
+                        "next_due": None,
+                    }
+                ],
+            },
+            {
+                "source": {**source, "id": "One-off UID"},
+                "item": {
+                    "id": "undated-example-task",
+                    "name": "Undated example task",
+                    "summary": "Undated example task",
+                    "timezone": "UTC",
+                    "due": None,
+                    "schedule": {"kind": "once"},
+                },
+            },
+            {
+                "source": {**source, "id": "Standing UID"},
+                "item": {
+                    "id": "standing-example-task",
+                    "name": "Standing example task",
+                    "summary": "Standing example task",
+                    "timezone": "UTC",
+                    "due": None,
+                    "schedule": {"kind": "standing"},
+                },
+            },
+            {
+                "source": {**source, "id": "Dated UID"},
+                "item": {
+                    "id": "dated-example-task",
+                    "name": "Dated example task",
+                    "summary": "Dated example task",
+                    "timezone": "UTC",
+                    "due": "2025-02-05",
+                    "schedule": {"kind": "once"},
+                },
+            },
+        ]
+    }
+    session = async_get_clientsession(hass)
+    owner = {"Authorization": f"Bearer {rust_backend.owner_token}"}
+    async with session.post(
+        f"{rust_backend.origin}/v1/migrations/preview",
+        json=payload,
+        headers=owner,
+    ) as response:
+        assert response.status == 200
+        report = await response.json()
+    assert report["applicable"] is True
+    assert [mapping["source"]["id"] for mapping in report["items"]] == [
+        "Original Case-Sensitive UID",
+        "One-off UID",
+        "Standing UID",
+        "Dated UID",
+    ]
+    async with session.get(
+        f"{rust_backend.origin}/v1/items", headers=owner
+    ) as response:
+        assert (await response.json())["items"] == []
+    async with session.post(
+        f"{rust_backend.origin}/v1/migrations",
+        json=payload,
+        headers={**owner, "Idempotency-Key": "import-example-source"},
+    ) as response:
+        assert response.status == 201
+        assert await response.json() == report
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "3"
+    todo = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    items = {item["summary"]: item for item in entity_items(todo, "todo.maintenance")}
+    finished = items["Finished example task"]
+    assert finished["status"] == "completed"
+    assert finished["completed"] == "2025-02-03T04:05:06+00:00"
+    assert "due" not in finished
+    for name in ("Undated example task", "Standing example task"):
+        assert items[name]["status"] == "needs_action"
+        assert "due" not in items[name]
+    assert items["Dated example task"]["due"] == "2025-02-05"
+    user = await hass_client(hass_user_token)
+    response = await user.get(
+        "/api/calendars/calendar.maintenance",
+        params={"start": "2025-02-01T00:00:00Z", "end": "2025-02-10T00:00:00Z"},
+    )
+    assert response.status == 200
+    events = await response.json()
+    assert len(events) == 1
+    assert events[0]["summary"] == "Dated example task"
+    assert events[0]["start"] == {"date": "2025-02-05"}
+    original = {
+        item.id: item
+        for item in entry.runtime_data.data.items
+        if item.status is ItemStatus.NEEDS_ACTION
+    }
+    for item_id in ("undated-example-task", "standing-example-task"):
+        item = original[item_id]
+        result = await hass.services.async_call(
+            DOMAIN,
+            "complete",
+            {
+                "item_id": item.id,
+                "occurrence_id": str(item.occurrence_id),
+                "if_match": f'"{item.revision}"',
+                "idempotency_key": f"complete-{item.id}",
+            },
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+            return_response=True,
+        )
+        assert result is not None
+        assert result["due"] is None
+        assert (result["occurrence_id"] == str(item.occurrence_id)) == (
+            item_id == "undated-example-task"
+        )
+    # Several writes share HA's refresh debouncer; poll the durable snapshot.
+    await entry.runtime_data.async_refresh()
+    current = {item.id: item for item in entry.runtime_data.data.items}
+    assert current["undated-example-task"].status is ItemStatus.COMPLETED
+    assert current["undated-example-task"].due is None
+    assert current["standing-example-task"].status is ItemStatus.NEEDS_ACTION
+    assert current["standing-example-task"].due is None
+    once = original["undated-example-task"]
+    replay = await hass.services.async_call(
+        DOMAIN,
+        "complete",
+        {
+            "item_id": once.id,
+            "occurrence_id": str(once.occurrence_id),
+            "if_match": f'"{once.revision}"',
+            "idempotency_key": f"complete-{once.id}",
+        },
+        context=Context(user_id=hass_user.id),
+        blocking=True,
+        return_response=True,
+    )
+    assert replay is not None
+    assert replay["revision"] == current[once.id].revision
+    assert replay["occurrence_id"] == str(once.occurrence_id)
+    assert replay["due"] is None
+    with pytest.raises(HomeAssistantError, match="task changed"):
+        await hass.services.async_call(
+            DOMAIN,
+            "complete",
+            {"item_id": once.id, "occurrence_id": str(once.occurrence_id)},
+            context=Context(user_id=hass_user.id),
+            blocking=True,
+        )
+    response = await user.get(f"{PREFIX}/items/finished-example-task/events")
+    assert response.status == 200
+    history = await response.json()
+    assert len(history["items"]) == 1
+    imported = history["items"][0]
+    assert imported["source"] == event_source
+    assert imported["completed_at"] == "2025-02-03T04:05:06Z"
+    assert imported["actor"] is None
+    assert imported["occurrence_id"] is None
+    assert imported["previous_due"] is None
+    assert imported["next_due"] is None
+    response = await user.get(f"{PREFIX}/items/finished-example-task")
+    item = await response.json()
+    assert item["source"] == source
+    assert item["status"] == "completed"
+    assert item["last_completion"] == imported
+    todo = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    items = {item["summary"]: item for item in entity_items(todo, "todo.maintenance")}
+    assert items["Undated example task"]["status"] == "completed"
+    assert items["Undated example task"]["uid"] == str(
+        original["undated-example-task"].occurrence_id
+    )
+    assert items["Standing example task"]["status"] == "needs_action"
+    assert items["Standing example task"]["uid"] != str(
+        original["standing-example-task"].occurrence_id
+    )
+    assert "due" not in items["Undated example task"]
+    assert "due" not in items["Standing example task"]
