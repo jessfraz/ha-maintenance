@@ -101,7 +101,7 @@ without writing data. Apply checks the complete batch again and requires an
 `Idempotency-Key`; a conflict rejects the whole batch. Source IDs, status,
 known completion timestamps, and supplied history are retained. Unknown dates,
 actors, and times stay unknown. Import does not complete work or calculate
-replacement dates. See the [migration contract](../README.md#migrating-existing-tasks)
+replacement dates. See the [migration contract](../docs/api.md#migrating-existing-tasks)
 and the fictional `config/migration.example.json` before preparing a mapping.
 Retain the original export and existing todos until that mapping is reviewed.
 
