@@ -5,6 +5,7 @@
 - Standing instructions stay visible in a separate, read-only list and cannot be completed. Only the Home Assistant owner can edit or remove them.
 - Recurring tasks require a concrete first due date. The form defaults to today in the selected time zone; the API rejects missing or cleared dates.
 - Owner permissions are enforced in the backend for protected creation, edits, type changes, archival, restoration, and migration.
+- Dashboard summary cards filter the queue with keyboard support and a visible selection. Completion history includes recurring and archived tasks with recorded work.
 
 ## 0.3.0
 

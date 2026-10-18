@@ -70,7 +70,10 @@ Keeping a template step's ID and wording preserves its current check; changing
 its wording clears that check. Completed history stays unchanged. Calendar
 months and years retain calendar behavior at month boundaries.
 
-The dashboard orders items by due date. Open `/items/<item-id>` for the current
+The dashboard summary cards filter active, overdue, upcoming, or previously
+completed work. Completion history includes recurring and archived tasks and
+orders them by their latest completion; other views order items by due date.
+Open `/items/<item-id>` for the current
 occurrence, description, checklist, instructions, links, and history. NFC tags
 should use the stable, authenticated Home Assistant app route, for example:
 

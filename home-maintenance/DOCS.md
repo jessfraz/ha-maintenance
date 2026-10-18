@@ -65,6 +65,11 @@ cannot. Removal archives the instruction, and only the owner can restore it.
 The integration must be connected with a recent owner check-in for protected
 ingress changes. A standalone owner credential retains that authority.
 
+Click a summary card to filter the queue. **Completions recorded** shows items
+with history, including recurring and archived tasks, most recent completion
+first. The count records completions, so a recurring task can contribute more
+than one. The **Completed** filter separately shows closed tasks.
+
 Each checklist template has up to 100 steps with unique, stable UUIDs and
 nonblank summaries of up to 200 UTF-8 bytes. Checking a step saves the actor
 and time on the current occurrence. Unchecking it clears that step's

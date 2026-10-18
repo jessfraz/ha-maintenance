@@ -255,6 +255,18 @@ main,
   border-radius: 8px;
   background: var(--paper);
   padding: 16px 18px;
+  color: var(--ink);
+  text-align: left;
+}
+.summary-stat:hover,
+.summary-stat[aria-pressed="true"] {
+  background: var(--soft);
+  border-color: var(--ink);
+  filter: none;
+  opacity: 1;
+}
+.summary-stat[aria-pressed="true"] {
+  box-shadow: 0 0 0 1px var(--ink);
 }
 .summary-stat strong {
   display: block;
