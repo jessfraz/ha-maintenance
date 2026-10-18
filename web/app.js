@@ -22,6 +22,12 @@ let editorIdTouched = false;
 let createRequest = null;
 let parentPrefix = null;
 let metadataRowId = 0;
+let haRegistry = { status: "not_connected" };
+let haTargets = new Map();
+let haRegistryRequest = 0;
+let haRegistryLoading = false;
+let haRegistryFailed = false;
+let editorReferences = [];
 const completionRequests = new Map();
 const completionBusy = new Set();
 const checklistRequests = new Map();
@@ -231,6 +237,176 @@ function safeLink(url, label) {
     return link;
   } catch {
     return null;
+  }
+}
+
+function haReferenceKey(reference) {
+  return `${reference.instance_id}/${reference.kind}/${reference.id}`;
+}
+
+function haTarget(reference) {
+  return reference.instance_id === haRegistry.instance_id
+    ? haTargets.get(`${reference.kind}/${reference.id}`)
+    : null;
+}
+
+function haRegistryReady() {
+  return haRegistry.status === "ready" && !haRegistryFailed && !haRegistryLoading;
+}
+
+function haReferenceName(reference) {
+  return haTarget(reference)?.name ||
+    `${reference.kind === "device" ? "Device" : "Entity"} ${reference.id}`;
+}
+
+function haReferenceDescription(reference) {
+  if (!haRegistryReady()) return "Home Assistant unavailable";
+  if (reference.instance_id !== haRegistry.instance_id)
+    return "Another Home Assistant instance";
+  const target = haTarget(reference);
+  if (!target) return `${reference.kind === "device" ? "Device" : "Entity"} not found`;
+  return [target.kind === "device" ? "Device" : target.entity_id,
+    target.disabled ? "Disabled" : null].filter(Boolean).join(" · ");
+}
+
+function haReferenceLink(reference) {
+  const target = haTarget(reference);
+  if (!haRegistryReady() || !target) return null;
+  const sameOrigin = isIngress && (!haRegistry.base_url ||
+    new URL(haRegistry.base_url).origin === location.origin);
+  const origin = sameOrigin ? location.origin : haRegistry.base_url;
+  if (!origin) return null;
+  let path;
+  if (target.kind === "device") {
+    path = `/config/devices/device/${encodeURIComponent(target.id)}`;
+  } else {
+    const params = new URLSearchParams({
+      "more-info-entity-id": target.entity_id,
+      "more-info-view": target.disabled ? "settings" : "info",
+    });
+    const route = sameOrigin && parentPrefix
+      ? `${parentPrefix}/${selected ? itemPath(selected.id) : ""}`
+      : "/";
+    path = `${route}?${params}`;
+  }
+  const link = safeLink(new URL(path, origin).href, target.name);
+  if (link && sameOrigin && parentPrefix) {
+    link.addEventListener("click", (event) => {
+      if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+        return;
+      event.preventDefault();
+      window.parent.postMessage(
+        { type: "home-assistant/navigate", path }, location.origin,
+      );
+    });
+  }
+  return link;
+}
+
+function renderHomeAssistantDetail() {
+  const root = byId("linked-home-assistant");
+  if (!root || !selected) return;
+  root.replaceChildren(element("h3", "Home Assistant"));
+  const list = element("ul", undefined, "ha-targets");
+  for (const reference of selected.home_assistant || []) {
+    const row = element("li");
+    const label = element("div");
+    label.append(haReferenceLink(reference) || element("span", haReferenceName(reference)),
+      element("small", haReferenceDescription(reference)));
+    row.append(label);
+    list.append(row);
+  }
+  root.append(list);
+}
+
+function renderHomeAssistantEditor() {
+  if (!byId("editor").open) return;
+  const selectedList = byId("ha-selected");
+  selectedList.replaceChildren();
+  const selectedKeys = new Set(editorReferences.map(haReferenceKey));
+  for (const reference of editorReferences) {
+    const row = element("li");
+    const label = element("div", haReferenceName(reference));
+    label.append(element("small", haReferenceDescription(reference)));
+    const remove = element("button", "Remove", "quiet small");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove link to ${haReferenceName(reference)}`);
+    remove.addEventListener("click", () => {
+      editorReferences = editorReferences.filter((value) =>
+        haReferenceKey(value) !== haReferenceKey(reference));
+      renderHomeAssistantEditor();
+      byId("ha-search").focus();
+    });
+    row.append(label, remove);
+    selectedList.append(row);
+  }
+  const results = byId("ha-results");
+  results.replaceChildren();
+  const status = byId("ha-search-status");
+  if (!haRegistryReady()) {
+    status.textContent = haRegistryLoading ? "Loading Home Assistant…"
+      : haRegistry.status === "unavailable" && haRegistry.reason === "limit_exceeded"
+        ? "The Home Assistant registry exceeds the supported size. Existing links are preserved."
+        : "Connect the Home Assistant integration to choose devices and entities. Existing links are preserved.";
+    return;
+  }
+  if (editorReferences.length >= 100) {
+    status.textContent = "100 links. Remove one to add another.";
+    return;
+  }
+  const query = byId("ha-search").value.trim().toLocaleLowerCase();
+  if (!query) { status.textContent = ""; return; }
+  const matches = haRegistry.targets.filter((target) =>
+    !selectedKeys.has(haReferenceKey({ ...target, instance_id: haRegistry.instance_id })) &&
+    [target.name, target.entity_id].some((value) => value?.toLocaleLowerCase().includes(query)),
+  ).sort((left, right) => left.name.localeCompare(right.name) ||
+    left.kind.localeCompare(right.kind) || left.id.localeCompare(right.id));
+  status.textContent = matches.length > 20
+    ? `Showing 20 of ${matches.length} matches. Refine your search to see the rest.`
+    : matches.length ? "" : "No matching devices or entities.";
+  for (const target of matches.slice(0, 20)) {
+    const reference = { kind: target.kind, instance_id: haRegistry.instance_id, id: target.id };
+    const row = element("li");
+    const label = element("div", target.name);
+    label.title = target.id;
+    label.append(element("small", haReferenceDescription(reference)));
+    const add = element("button", "Link", "quiet small");
+    add.type = "button";
+    add.setAttribute("aria-label", `Link ${target.name}`);
+    add.addEventListener("click", () => {
+      if (editorReferences.length >= 100 || !haRegistryReady() || !haTarget(reference) ||
+        editorReferences.some((value) => haReferenceKey(value) === haReferenceKey(reference)))
+        return;
+      editorReferences.push(reference);
+      renderHomeAssistantEditor();
+      byId("ha-search").focus();
+    });
+    row.append(label, add);
+    results.append(row);
+  }
+}
+
+async function loadHomeAssistantRegistry() {
+  if (!isOwner) return;
+  const generation = ++haRegistryRequest;
+  haRegistryLoading = true;
+  renderHomeAssistantEditor();
+  try {
+    const registry = await api("v1/home-assistant/registry");
+    if (generation !== haRegistryRequest) return;
+    haRegistry = registry;
+    haTargets = new Map((registry.targets || []).map((target) =>
+      [`${target.kind}/${target.id}`, target]));
+    haRegistryFailed = false;
+  } catch {
+    if (generation !== haRegistryRequest) return;
+    haRegistryFailed = true;
+  } finally {
+    if (generation === haRegistryRequest) {
+      haRegistryLoading = false;
+      renderHomeAssistantEditor();
+      renderHomeAssistantDetail();
+    }
   }
 }
 
@@ -469,6 +645,7 @@ async function load() {
     renderSummary(summary);
     renderList();
     if (selected) renderDetail();
+    void loadHomeAssistantRegistry();
   } catch (error) {
     if (generation === listGeneration) {
       byId("list-status").textContent =
@@ -666,6 +843,12 @@ function renderDetail() {
     specs.append(list);
     root.append(specs);
   }
+  if (item.home_assistant?.length) {
+    const links = section("Home Assistant");
+    links.id = "linked-home-assistant";
+    root.append(links);
+    renderHomeAssistantDetail();
+  }
   if (item.resources.length || item.reorder_url) {
     const references = section("References");
     const links = element("div", undefined, "resources");
@@ -763,6 +946,7 @@ async function openDetail(id, updateRoute = true) {
   byId("events-status").textContent = "Loading history…";
   renderDetail();
   if (!byId("detail").open) byId("detail").showModal();
+  void loadHomeAssistantRegistry();
   if (updateRoute) navigate(id);
   if (item.schedule.kind !== "instruction" || item.last_completion !== null)
     await loadEvents(generation);
@@ -1147,6 +1331,7 @@ function addChecklistRow(step = { id: crypto.randomUUID(), summary: "" }) {
 function openEditor(item = null) {
   if (!isOwner) return;
   editing = item;
+  editorReferences = [...(item?.home_assistant || [])];
   createRequest = null;
   editorIdTouched = Boolean(item);
   const form = byId("edit-form");
@@ -1194,6 +1379,9 @@ function openEditor(item = null) {
   for (const step of item?.checklist || []) addChecklistRow(step);
   updateChecklistEditor();
   if (!byId("editor").open) byId("editor").showModal();
+  byId("ha-picker").open = false;
+  renderHomeAssistantEditor();
+  void loadHomeAssistantRegistry();
   byId("name").focus();
 }
 
@@ -1256,6 +1444,7 @@ async function saveItem() {
       .filter(Boolean),
     specs: metadataValues("spec"),
     resources: metadataValues("resource"),
+    home_assistant: editorReferences,
     reorder_url: value("schedule-kind") === "instruction"
       ? null : value("reorder_url") || null,
   };
@@ -1454,6 +1643,16 @@ byId("refresh").addEventListener(
   }),
 );
 byId("query").addEventListener("input", renderList);
+byId("ha-search").addEventListener("input", renderHomeAssistantEditor);
+byId("ha-search").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") event.preventDefault();
+});
+byId("ha-picker").addEventListener("toggle", () => {
+  if (byId("ha-picker").open) {
+    void loadHomeAssistantRegistry();
+    byId("ha-search").focus();
+  }
+});
 byId("view").addEventListener(
   "change",
   guarded(async () => {

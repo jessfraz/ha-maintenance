@@ -70,6 +70,18 @@ with history, including recurring and archived tasks, most recent completion
 first. The count records completions, so a recurring task can contribute more
 than one. The **Completed** filter separately shows closed tasks.
 
+To associate an appliance or sensor with an item, open its editor's **Home
+Assistant** section, choose **Link a device or entity**, and search by name or
+entity ID. Link as many as needed, then save. The same device or entity can be
+linked to other maintenance items. Use **Remove** beside a link to detach it.
+
+Device links open HA's device page; entity links open its native more-info
+dialog. They also appear in to-do and calendar descriptions. Renaming an entity
+preserves its association. Removed objects and references to another HA
+instance remain visible for repair. If HA is unavailable, saved associations
+are preserved and can still be removed. Update the app and integration together
+to enable the picker.
+
 Each checklist template has up to 100 steps with unique, stable UUIDs and
 nonblank summaries of up to 200 UTF-8 bytes. Checking a step saves the actor
 and time on the current occurrence. Unchecking it clears that step's
@@ -155,7 +167,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.4.0
+  ghcr.io/jessfraz/ha-maintenance:0.5.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

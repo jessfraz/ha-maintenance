@@ -14,6 +14,9 @@ from homeassistant.config_entries import SOURCE_HASSIO, SOURCE_USER, ConfigEntry
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import instance_id
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util.json import JsonObjectType
@@ -25,6 +28,7 @@ from custom_components.home_maintenance.const import (
     CONF_BACKEND_URL,
     CONF_TOKEN,
     DOMAIN,
+    MAX_RESPONSE_BYTES,
     SUMMARY_KEYS,
 )
 from custom_components.home_maintenance.models import (
@@ -34,7 +38,7 @@ from custom_components.home_maintenance.models import (
     MaintenanceItem,
 )
 
-from .conftest import SECOND_STEP_ID, STEP_ID, entity_items
+from .conftest import SECOND_STEP_ID, STEP_ID, RegisteredObjects, entity_items
 
 PREFIX = "/api/home_maintenance/v1"
 OWNER_TOKEN = "test-owner-credential-at-least-32-characters"
@@ -1069,3 +1073,261 @@ async def test_recurring_writes_require_a_due_date_through_the_ha_bridge(
     assert response.status == 400
     response = await admin.get(f"{PREFIX}/items/{original.id}")
     assert MaintenanceItem.parse(await response.json()) == recurring
+
+
+async def test_real_registry_links_survive_shared_tasks_renames_and_deletions(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    registered_objects: RegisteredObjects,
+    entity_registry: er.EntityRegistry,
+    device_registry: dr.DeviceRegistry,
+    rust_backend: RustBackend,
+) -> None:
+    """Stable associations round-trip through real SQLite and native HA actions."""
+    identity = await instance_id.async_get(hass)
+    references = [
+        {"kind": "device", "instance_id": identity, "id": registered_objects.device_id},
+        {
+            "kind": "entity",
+            "instance_id": identity,
+            "id": registered_objects.registry_id,
+        },
+    ]
+    originals: list[MaintenanceItem] = []
+    for item_id in ("first-linked-task", "second-linked-task"):
+        async with async_get_clientsession(hass).post(
+            f"{rust_backend.origin}/v1/items",
+            headers={
+                "Authorization": f"Bearer {rust_backend.owner_token}",
+                "Idempotency-Key": f"create-{item_id}",
+            },
+            json={
+                "id": item_id,
+                "name": item_id,
+                "summary": item_id,
+                "timezone": "UTC",
+                "due": "2026-10-15",
+                "schedule": {"kind": "once"},
+                "home_assistant": references,
+            },
+        ) as response:
+            assert response.status == 201
+            body = await response.json()
+            assert body["home_assistant"] == references
+            originals.append(MaintenanceItem.parse(body))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    admin = await hass_client()
+    household = await hass_client(hass_user_token)
+    response = await household.get(f"{PREFIX}/home-assistant/registry")
+    assert response.status == 403
+    response = await admin.get(f"{PREFIX}/home-assistant/registry")
+    assert response.status == 200
+    catalog = await response.json()
+    assert catalog["status"] == "ready"
+    assert catalog["instance_id"] == identity
+    entity = next(
+        target
+        for target in catalog["targets"]
+        if target["id"] == registered_objects.registry_id
+    )
+    assert entity["entity_id"] == registered_objects.entity_id
+    todo = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    tasks = entity_items(todo, "todo.maintenance")
+    assert len(tasks) == 2
+    assert all(
+        f"/config/devices/device/{registered_objects.device_id}"
+        in str(item["description"])
+        for item in tasks
+    )
+
+    await hass.services.async_call(
+        "todo",
+        "update_item",
+        {
+            "entity_id": "todo.maintenance",
+            "item": str(originals[0].occurrence_id),
+            "status": "completed",
+        },
+        blocking=True,
+    )
+    response = await admin.get(f"{PREFIX}/items/{originals[0].id}")
+    completed = await response.json()
+    assert completed["status"] == "completed"
+    assert completed["home_assistant"] == references
+    entity_registry.async_update_entity(
+        registered_objects.entity_id,
+        new_entity_id="sensor.renamed_example",
+        name="Renamed example sensor",
+    )
+    await asyncio.sleep(0.55)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    catalog = await (await admin.get(f"{PREFIX}/home-assistant/registry")).json()
+    entity = next(
+        target
+        for target in catalog["targets"]
+        if target["id"] == registered_objects.registry_id
+    )
+    assert entity["entity_id"] == "sensor.renamed_example"
+    assert entity["name"] == "Renamed example sensor"
+    response = await admin.get(f"{PREFIX}/items/{originals[1].id}")
+    assert MaintenanceItem.parse(await response.json()) == originals[1]
+    entity_registry.async_remove("sensor.renamed_example")
+    device_registry.async_remove_device(registered_objects.device_id)
+    await asyncio.sleep(0.55)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    catalog = await (await admin.get(f"{PREFIX}/home-assistant/registry")).json()
+    assert all(
+        target["id"]
+        not in {registered_objects.registry_id, registered_objects.device_id}
+        for target in catalog["targets"]
+    )
+    response = await admin.get(f"{PREFIX}/items/{originals[1].id}")
+    assert MaintenanceItem.parse(await response.json()) == originals[1]
+    todo = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": "todo.maintenance"},
+        blocking=True,
+        return_response=True,
+    )
+    tasks = entity_items(todo, "todo.maintenance")
+    assert all(
+        str(item["description"]).count("removed from Home Assistant") == 2
+        for item in tasks
+    )
+
+
+async def test_large_real_registry_catalog_round_trips_through_ha_bridge(
+    hass: HomeAssistant,
+    hass_client: ClientSessionGenerator,
+    rust_backend: RustBackend,
+) -> None:
+    """A valid catalog larger than ordinary API responses still reaches the picker."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    targets = [
+        {
+            "kind": "device",
+            "id": f"example-device-{number}",
+            "name": "Example device " + "x" * 180,
+            "disabled": False,
+        }
+        for number in range(5_000)
+    ]
+    async with async_get_clientsession(hass).put(
+        f"{rust_backend.origin}/v1/integration/registry",
+        json={
+            "status": "ready",
+            "instance_id": await instance_id.async_get(hass),
+            "base_url": None,
+            "targets": targets,
+        },
+        headers={
+            "Authorization": f"Bearer {rust_backend.integration_token}",
+            "X-Maintenance-System-Actor": "ha:integration",
+        },
+    ) as response:
+        assert response.status == 204
+    admin = await hass_client()
+    response = await admin.get(f"{PREFIX}/home-assistant/registry")
+    assert response.status == 200
+    assert len(await response.read()) > MAX_RESPONSE_BYTES
+    catalog = await response.json()
+    assert catalog["status"] == "ready"
+    assert catalog["targets"] == targets
+
+
+async def test_link_heavy_inventory_keeps_all_items_across_bounded_pages(
+    hass: HomeAssistant, rust_backend: RustBackend
+) -> None:
+    """Adaptive pages preserve a cursor when later tasks have many shared links."""
+    identity = await instance_id.async_get(hass)
+    references = [
+        {"kind": "device", "instance_id": identity, "id": f"{number + 1:032x}"}
+        for number in range(100)
+    ]
+    definitions: list[dict[str, object]] = [
+        {
+            "id": f"first-small-task-{number:03}",
+            "name": "Example task",
+            "summary": "Example task",
+            "timezone": "UTC",
+            "schedule": {"kind": "once"},
+        }
+        for number in range(100)
+    ]
+    linked_ids = {f"second-linked-task-{number:03}" for number in range(120)}
+    definitions.extend(
+        {
+            "id": item_id,
+            "name": "Example linked task",
+            "summary": "Example linked task",
+            "timezone": "UTC",
+            "schedule": {"kind": "once"},
+            "home_assistant": references,
+        }
+        for item_id in sorted(linked_ids)
+    )
+    session = async_get_clientsession(hass)
+    owner = {"Authorization": f"Bearer {rust_backend.owner_token}"}
+    for start in range(0, len(definitions), 15):
+        async with session.post(
+            f"{rust_backend.origin}/v1/imports",
+            json={"items": definitions[start : start + 15]},
+            headers=owner,
+        ) as response:
+            assert response.status == 200
+    # The first bounded retry can read the 100 small tasks. The next 100 linked
+    # tasks still exceed the same cap, so a later retry must keep its cursor.
+    async with session.get(
+        f"{rust_backend.origin}/v1/items?limit=200", headers=owner
+    ) as response:
+        assert response.status == 200
+        assert len(await response.read()) > MAX_RESPONSE_BYTES
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_BACKEND_URL: rust_backend.origin,
+            CONF_TOKEN: rust_backend.integration_token,
+        },
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    snapshot = entry.runtime_data.data
+    assert len(snapshot.items) == 220
+    assert len({item.occurrence_id for item in snapshot.items}) == 220
+    assert {item.id for item in snapshot.items} == {
+        definition["id"] for definition in definitions
+    }
+    linked = [item for item in snapshot.items if item.id in linked_ids]
+    assert len(linked) == 120
+    assert all(len(item.home_assistant) == 100 for item in linked)
+    assert all(item.home_assistant == linked[0].home_assistant for item in linked)
+    state = hass.states.get("todo.maintenance")
+    assert state is not None
+    assert state.state == "220"

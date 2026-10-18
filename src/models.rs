@@ -6,7 +6,7 @@ use schemars::{JsonSchema, schema::Schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::error::Error;
+use crate::{error::Error, home_assistant::HomeAssistantReference};
 
 /// Stable public item identity; occurrence identities change after completion.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
@@ -198,6 +198,8 @@ pub struct Definition {
     pub resources: Vec<Resource>,
     #[serde(default)]
     pub reorder_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home_assistant: Vec<HomeAssistantReference>,
 }
 impl Definition {
     pub fn validate(&self) -> Result<(), Error> {
@@ -213,9 +215,15 @@ impl Definition {
             || self.checklist.len() > 100
             || self.specs.len() > 100
             || self.resources.len() > 100
+            || self.home_assistant.len() > 100
         {
             return Err(Error::Invalid(
-                "at most 100 instructions, checklist steps, specs or links per item",
+                "at most 100 instructions, checklist steps, specs, resources or Home Assistant references per item",
+            ));
+        }
+        if self.home_assistant.iter().collect::<BTreeSet<_>>().len() != self.home_assistant.len() {
+            return Err(Error::Invalid(
+                "Home Assistant references must be unique by instance, kind and id",
             ));
         }
         let mut step_ids = BTreeSet::new();
@@ -400,6 +408,8 @@ pub struct UpdateItem {
     pub resources: Change<Vec<Resource>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub reorder_url: Change<Option<String>>,
+    #[serde(default, skip_serializing_if = "Change::is_missing")]
+    pub home_assistant: Change<Vec<HomeAssistantReference>>,
 }
 impl UpdateItem {
     pub fn apply(
@@ -420,6 +430,7 @@ impl UpdateItem {
         self.specs.apply(&mut definition.specs);
         self.resources.apply(&mut definition.resources);
         self.reorder_url.apply(&mut definition.reorder_url);
+        self.home_assistant.apply(&mut definition.home_assistant);
         definition.validate()?;
         validate_due(definition.schedule, *due)
     }

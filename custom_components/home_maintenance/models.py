@@ -7,6 +7,40 @@ from enum import StrEnum
 from uuid import UUID
 
 ITEM_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+REGISTRY_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+class HomeAssistantKind(StrEnum):
+    """The HA registry that owns a linked object."""
+
+    DEVICE = "device"
+    ENTITY = "entity"
+
+
+@dataclass(frozen=True, slots=True)
+class HomeAssistantReference:
+    """An instance-scoped registry identity, independent of names and entity IDs."""
+
+    kind: HomeAssistantKind
+    instance_id: str
+    id: str
+
+    @classmethod
+    def parse(cls, value: object) -> HomeAssistantReference:
+        if not isinstance(value, dict):
+            raise ValueError("Invalid Home Assistant reference")
+        kind = value.get("kind")
+        instance_id = value.get("instance_id")
+        identity = value.get("id")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(instance_id, str)
+            or not REGISTRY_ID.fullmatch(instance_id)
+            or not isinstance(identity, str)
+            or not REGISTRY_ID.fullmatch(identity)
+        ):
+            raise ValueError("Invalid Home Assistant reference")
+        return cls(HomeAssistantKind(kind), instance_id, identity)
 
 
 class ItemStatus(StrEnum):
@@ -124,6 +158,7 @@ class MaintenanceItem:
     due: date | None
     instructions: tuple[str, ...]
     checklist: tuple[ChecklistStep, ...]
+    home_assistant: tuple[HomeAssistantReference, ...]
 
     @property
     def task_description(self) -> str | None:
@@ -166,6 +201,7 @@ class MaintenanceItem:
         schedule = value.get("schedule")
         occurrence = value.get("occurrence")
         instructions = value.get("instructions")
+        home_assistant = value.get("home_assistant", [])
         if (
             not isinstance(item_id, str)
             or not ITEM_ID.fullmatch(item_id)
@@ -184,6 +220,8 @@ class MaintenanceItem:
             or not isinstance(occurrence, dict)
             or not isinstance(instructions, list)
             or not all(isinstance(line, str) for line in instructions)
+            or not isinstance(home_assistant, list)
+            or len(home_assistant) > 100
         ):
             raise ValueError("Invalid item")
         completed_at = None
@@ -212,6 +250,11 @@ class MaintenanceItem:
         steps = tuple(ChecklistStep.parse(record) for record in checklist)
         if len({step.id for step in steps}) != len(steps):
             raise ValueError("Duplicate occurrence checklist step")
+        references = tuple(
+            HomeAssistantReference.parse(record) for record in home_assistant
+        )
+        if len(set(references)) != len(references):
+            raise ValueError("Duplicate Home Assistant reference")
         due_date = date.fromisoformat(due) if due is not None else None
         # All-day calendar events need a following date for their exclusive end.
         if due_date is not None and (
@@ -233,6 +276,7 @@ class MaintenanceItem:
             due_date,
             tuple(instructions),
             steps,
+            references,
         )
 
 

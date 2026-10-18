@@ -17,6 +17,7 @@ use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::{
+    home_assistant::{Registry, RegistryCatalog, RegistryReport},
     installation::{Installation, InstallationReport, PresenceReport},
     models::{
         Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Migration,
@@ -33,6 +34,7 @@ pub struct Context {
     integration: Option<[u8; 32]>,
     ingress_peer: Option<IpAddr>,
     installation: Arc<Installation>,
+    registry: Arc<Registry>,
 }
 impl Context {
     pub fn new(store: Store, owner: &str) -> Self {
@@ -42,6 +44,7 @@ impl Context {
             integration: None,
             ingress_peer: None,
             installation: Arc::new(Installation::default()),
+            registry: Arc::new(Registry::default()),
         }
     }
     pub fn with_integration(mut self, token: &str) -> Self {
@@ -702,6 +705,39 @@ async fn integration_presence(
         .await?;
     Ok(HttpResponseUpdatedNoContent())
 }
+/// Publish only the minimal device/entity registry through the dedicated adapter.
+#[endpoint {method=PUT,path="/v1/integration/registry",tags=["system"],request_body_max_bytes=8*1024*1024}]
+async fn integration_registry(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<RegistryReport>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let principal = authenticate(&request).await?;
+    if !matches!(principal.role, Role::Integration)
+        || !matches!(
+            principal.actor,
+            Actor::System {
+                id: SystemActor::Integration,
+                ..
+            }
+        )
+        || request.context().ingress_peer.is_some()
+    {
+        return Err(fail(
+            Status::FORBIDDEN,
+            "dedicated integration system credential required",
+        ));
+    }
+    request.context().registry.record(body.into_inner()).await?;
+    Ok(HttpResponseUpdatedNoContent())
+}
+/// Registry labels are ephemeral and visible only to administrators.
+#[endpoint {method=GET,path="/v1/home-assistant/registry",tags=["system"]}]
+async fn home_assistant_registry(
+    request: RequestContext<Arc<Context>>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<RegistryCatalog>, PrivateHeaders>, HttpError> {
+    administrator(&request).await?;
+    Ok(private(request.context().registry.catalog().await))
+}
 /// Readiness only. Never returns household state or credentials.
 #[endpoint {method=GET,path="/health",tags=["system"]}]
 async fn health(
@@ -788,7 +824,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 27] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 29] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
@@ -810,6 +846,8 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         installation.into(),
         installation_check.into(),
         integration_presence.into(),
+        integration_registry.into(),
+        home_assistant_registry.into(),
         health.into(),
         schema.into(),
         index.into(),

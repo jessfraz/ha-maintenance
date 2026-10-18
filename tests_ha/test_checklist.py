@@ -133,7 +133,11 @@ async def test_step_action_preserves_parent_and_uses_trusted_context(
         "step_id": STEP_ID,
         "completed": True,
     }
-    forwarded = next(request for request in backend.requests if request.method == "PUT")
+    forwarded = next(
+        request
+        for request in backend.requests
+        if request.path == f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}"
+    )
     assert forwarded.path == f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}"
     assert forwarded.headers["If-Match"] == '"1"'
     assert forwarded.headers["Idempotency-Key"] == "step-update"
@@ -182,7 +186,11 @@ async def test_clear_step_uses_false_without_advancing_the_parent(
     assert result is not None
     assert result["completed"] is False
     assert result["occurrence_id"] == OCCURRENCE_ID
-    forwarded = next(request for request in backend.requests if request.method == "PUT")
+    forwarded = next(
+        request
+        for request in backend.requests
+        if request.path == f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}"
+    )
     assert forwarded.headers["If-Match"] == '"2"'
     assert json.loads(forwarded.body) == {
         "occurrence_id": OCCURRENCE_ID,
@@ -211,7 +219,11 @@ async def test_step_conflicts_never_retry_against_a_new_parent(
             },
             blocking=True,
         )
-    writes = [request for request in backend.requests if request.method == "PUT"]
+    writes = [
+        request
+        for request in backend.requests
+        if request.path == f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}"
+    ]
     assert len(writes) == 1
     assert json.loads(writes[0].body)["occurrence_id"] == OCCURRENCE_ID
 
@@ -269,7 +281,11 @@ async def test_proxy_allows_real_step_updates_and_overrides_forged_actor_headers
         },
     )
     assert response.status == 200
-    forwarded = next(request for request in backend.requests if request.method == "PUT")
+    forwarded = next(
+        request
+        for request in backend.requests
+        if request.path == f"/v1/items/{ITEM_ID}/checklist/{STEP_ID}"
+    )
     assert forwarded.headers["X-Maintenance-Actor-Id"] == f"ha:{hass_user.id}"
     assert forwarded.headers["X-Maintenance-Actor-Name"] == hass_user.name
     assert "X-Maintenance-Admin" not in forwarded.headers
