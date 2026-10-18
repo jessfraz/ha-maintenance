@@ -69,6 +69,9 @@ administrator. Other users can complete work through the native to-do list and
 integration actions. [Stable item links](home-maintenance/DOCS.md#nfc-tags) also
 work with NFC tags.
 
+[Native diagnostics](home-maintenance/DOCS.md#diagnostics) provide operational
+metadata and aggregate counts for troubleshooting.
+
 ## API
 
 The service exposes a bearer-authenticated JSON API for tasks, checklists,

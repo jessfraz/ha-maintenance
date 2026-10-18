@@ -256,7 +256,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.8.0
+  ghcr.io/jessfraz/ha-maintenance:0.9.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its
@@ -281,6 +281,23 @@ completion history, and credentials. For a manual backup, stop the container
 cleanly before copying the complete `/data` volume. Restore that volume before starting the service.
 CI verifies a cold-volume restore into a fresh container; this does not prove
 that a particular Home Assistant backup has been restored successfully.
+
+## Diagnostics
+
+Open **Settings → Devices & services → Maintenance**, then choose **Download
+diagnostics** from the integration's menu. The download requires administrator
+access.
+
+Maintenance includes connection mode, entry and polling state, cached Assist
+exposure, and aggregate task and entity counts. It uses the current cached
+snapshot and makes no backend requests. Task counts are omitted when that
+snapshot is unavailable; diagnostics also work when setup failed or the
+integration is unloaded.
+
+The integration's payload omits credentials, endpoints, task contents, and task
+or registry identifiers. Errors include their type, without messages or
+tracebacks. Home Assistant adds its standard system, integration, and setup
+metadata around that payload.
 
 ## Updates
 

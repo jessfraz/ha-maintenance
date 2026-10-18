@@ -1565,7 +1565,7 @@
   "info": {
     "description": "Local one-off, standing and recurring maintenance tasks, owner-managed standing instructions, source-preserving migrations, completion history and durable reorder requests. Recurring tasks require a due date; instructions cannot be completed. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.",
     "title": "Maintenance API",
-    "version": "0.8.0"
+    "version": "0.9.0"
   },
   "openapi": "3.0.3",
   "paths": {

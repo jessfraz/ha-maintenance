@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0
+
+- Add Home Assistant's native diagnostics download with safe operational metadata and aggregate counts.
+- Omit credentials, endpoints, task contents, and task or registry identifiers from the integration's diagnostic payload.
+- Use cached state so diagnostics remain available during service outages without refreshing or changing data.
+
 ## 0.8.0
 
 - Expose task queries and completion through Home Assistant's Assist LLM API.
