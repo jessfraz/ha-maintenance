@@ -10,11 +10,15 @@ from homeassistant.components.todo import (
     TodoListEntity,
     TodoListEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.exceptions import ServiceValidationError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import (
+    AddConfigEntryEntitiesCallback,
+    async_get_current_platform,
+)
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -28,13 +32,60 @@ async def async_setup_entry(
     entry: ConfigEntry[MaintenanceCoordinator],
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Separate actionable tasks from persistent, read-only instructions."""
-    async_add_entities(
-        [
-            MaintenanceTodo(entry.runtime_data, entry.entry_id),
-            MaintenanceInstructions(entry.runtime_data, entry.entry_id),
-        ]
-    )
+    """Expose the instructions list only while active references exist."""
+    coordinator = entry.runtime_data
+    platform = async_get_current_platform()
+    registry = er.async_get(hass)
+    unique_id = f"{entry.entry_id}_instructions"
+    async_add_entities([MaintenanceTodo(coordinator, entry.entry_id)])
+
+    def has_instructions() -> bool:
+        return any(
+            not item.archived and item.schedule_kind is ScheduleKind.INSTRUCTION
+            for item in coordinator.data.items
+        )
+
+    async def reconcile() -> None:
+        while coordinator.last_update_success and entry.state in {
+            ConfigEntryState.SETUP_IN_PROGRESS,
+            ConfigEntryState.LOADED,
+        }:
+            present = has_instructions()
+            entity_id = registry.async_get_entity_id("todo", DOMAIN, unique_id)
+            if present:
+                registered = registry.async_get(entity_id) if entity_id else None
+                if entity_id in platform.entities or (
+                    registered and registered.disabled
+                ):
+                    return
+                # Await addition so a later empty snapshot cannot race a queued add.
+                await platform.async_add_entities(
+                    [MaintenanceInstructions(coordinator, entry.entry_id)]
+                )
+            elif entity_id is not None:
+                if entity := platform.entities.get(entity_id):
+                    await entity.async_remove(force_remove=True)
+                # Core retains registry customizations for re-creation with this ID.
+                registry.async_remove(entity_id)
+                # Also clear a previous version's restored or orphaned empty state.
+                hass.states.async_remove(entity_id)
+            else:
+                return
+            if present == has_instructions():
+                return
+
+    @callback
+    def request_reconcile() -> None:
+        if entry.state is ConfigEntryState.LOADED and (
+            coordinator.instructions_task is None
+            or coordinator.instructions_task.done()
+        ):
+            coordinator.instructions_task = entry.async_create_task(
+                hass, reconcile(), "Maintenance instructions list", eager_start=False
+            )
+
+    entry.async_on_unload(coordinator.async_add_listener(request_reconcile))
+    await reconcile()
 
 
 class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity):

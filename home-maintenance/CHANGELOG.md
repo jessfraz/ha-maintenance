@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Show the Home Assistant Instructions list only while active instructions exist.
+- Remove empty lists left by earlier versions on upgrade; restore saved entity names and IDs when instructions are added again.
+- Finish pending entity additions before unloading the integration.
+
 ## 0.5.0
 
 - Add a Home Assistant task-list card with current status and due dates. Each row opens the exact task in Maintenance through authenticated ingress and preserves it through login.

@@ -992,14 +992,8 @@ async def test_instructions_stay_read_only_and_only_verified_owner_can_archive(
     )
     assert response.status == 200
     await entry.runtime_data.async_refresh()
-    references = await hass.services.async_call(
-        "todo",
-        "get_items",
-        {"entity_id": "todo.maintenance_instructions"},
-        blocking=True,
-        return_response=True,
-    )
-    assert entity_items(references, "todo.maintenance_instructions") == []
+    await hass.async_block_till_done()
+    assert hass.states.get("todo.maintenance_instructions") is None
     response = await household.get(f"{PREFIX}/items/{original.id}")
     archived = MaintenanceItem.parse(await response.json())
     assert archived.archived is True

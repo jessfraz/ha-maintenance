@@ -1,5 +1,7 @@
 """Home Assistant adapter for the local Maintenance service."""
 
+import asyncio
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -80,4 +82,11 @@ async def async_unload_entry(
     hass: HomeAssistant, entry: MaintenanceConfigEntry
 ) -> bool:
     """Release entities and polling while retaining HA's shared HTTP session."""
+    pending = entry.runtime_data.instructions_task
+    if pending is not None and not pending.done():
+        # Finish a cancelled add's rollback before Core tears down its platform.
+        pending.cancel()
+        with suppress(asyncio.CancelledError):
+            await pending
+    entry.runtime_data.instructions_task = None
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)

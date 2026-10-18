@@ -66,6 +66,7 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             always_update=False,
         )
         self.client = client
+        self.instructions_task: asyncio.Task[None] | None = None
         self._entry = entry
         self._version = version
         self._instance_id: str | None = None

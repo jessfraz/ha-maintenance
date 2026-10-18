@@ -56,7 +56,7 @@ limit: 100
 
 The integration registers the card automatically. It also provides:
 
-- Native to-do lists for tasks and read-only standing instructions.
+- A native task list and a read-only Instructions list when active instructions exist.
 - A [read-only calendar](home-maintenance/DOCS.md#calendar) of current due dates.
 - Sensors for active, overdue, and upcoming tasks, plus completion counts.
 - Actions to check steps and complete work.

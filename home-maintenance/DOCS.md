@@ -62,6 +62,8 @@ the dashboard and HA's read-only Instructions list without becoming work to
 check off. It has no due date or completion action. Only the Home Assistant
 owner can edit or remove it, including through the API; other administrators
 cannot. Removal archives the instruction, and only the owner can restore it.
+The Instructions list appears only while it has active entries. Updating the
+integration removes an existing empty list automatically.
 The integration must be connected with a recent owner check-in for protected
 ingress changes. A standalone owner credential retains that authority.
 
@@ -197,7 +199,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.5.0
+  ghcr.io/jessfraz/ha-maintenance:0.5.1
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

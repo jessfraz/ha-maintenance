@@ -1,5 +1,6 @@
 """Persistent instructions remain readable without becoming checkable tasks."""
 
+import asyncio
 import json
 
 import pytest
@@ -13,13 +14,19 @@ from homeassistant.exceptions import (
     ServiceValidationError,
     Unauthorized,
 )
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import intent
-from pytest_homeassistant_custom_component.common import MockUser
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
-from custom_components.home_maintenance.const import DOMAIN
+from custom_components.home_maintenance.const import (
+    CONF_BACKEND_URL,
+    CONF_TOKEN,
+    DOMAIN,
+)
 from custom_components.home_maintenance.models import ScheduleKind
 from custom_components.home_maintenance.services import async_actor
+from custom_components.home_maintenance.todo import MaintenanceInstructions
 
 from .conftest import (
     NEXT_OCCURRENCE_ID,
@@ -42,6 +49,267 @@ def instruction_record(*, archived: bool = False) -> dict[str, object]:
         due=None,
         archived=archived,
     )
+
+
+async def async_set_inventory(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    items: list[dict[str, object]],
+) -> None:
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps({"items": items, "next_page": None}).encode(),
+        {},
+    )
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+
+@pytest.mark.parametrize("change", ["archive", "once", "missing"])
+async def test_instructions_reappear_with_saved_identity_and_name(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    entity_registry: er.EntityRegistry,
+    change: str,
+) -> None:
+    await async_set_inventory(hass, entry, backend, [instruction_record()])
+    registered = entity_registry.async_get("todo.maintenance_instructions")
+    assert registered is not None
+    entity_registry.async_update_entity(
+        registered.entity_id,
+        new_entity_id="todo.example_references",
+        name="Example reference list",
+    )
+    await hass.async_block_till_done()
+    instruction = instruction_record()
+    if change == "archive":
+        instruction["archived"] = True
+    elif change == "once":
+        instruction["schedule"] = {"kind": "once"}
+    await async_set_inventory(
+        hass,
+        entry,
+        backend,
+        [] if change == "missing" else [instruction],
+    )
+    assert hass.states.get("todo.example_references") is None
+    assert entity_registry.async_get("todo.example_references") is None
+    assert hass.states.get("todo.maintenance") is not None
+    await async_set_inventory(hass, entry, backend, [instruction_record()])
+    restored = entity_registry.async_get("todo.example_references")
+    assert restored is not None
+    assert restored.id == registered.id
+    assert restored.unique_id == registered.unique_id
+    assert restored.name == "Example reference list"
+    assert hass.states.get("todo.example_references") is not None
+    assert hass.states.get("todo.maintenance_instructions") is None
+    response = await hass.services.async_call(
+        "todo",
+        "get_items",
+        {"entity_id": restored.entity_id},
+        blocking=True,
+        return_response=True,
+    )
+    assert len(entity_items(response, restored.entity_id)) == 1
+
+
+async def test_list_stays_until_the_last_instruction_is_archived(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    second = item_record(
+        item_id="example-second-reference",
+        occurrence_id=OCCURRENCE_ID,
+        schedule_kind="instruction",
+        due=None,
+    )
+    await async_set_inventory(hass, entry, backend, [instruction_record(), second])
+    await async_set_inventory(
+        hass,
+        entry,
+        backend,
+        [instruction_record(archived=True), second],
+    )
+    assert hass.states.get("todo.maintenance_instructions") is not None
+    second["archived"] = True
+    await async_set_inventory(
+        hass,
+        entry,
+        backend,
+        [instruction_record(archived=True), second],
+    )
+    assert hass.states.get("todo.maintenance_instructions") is None
+
+
+async def test_failed_inventory_does_not_remove_existing_instructions(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    await async_set_inventory(hass, entry, backend, [instruction_record()])
+    registered = entity_registry.async_get("todo.maintenance_instructions")
+    backend.responses[("GET", "/v1/items")] = (500, b"{}", {})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    state = hass.states.get("todo.maintenance_instructions")
+    assert state is not None and state.state == "unavailable"
+    assert entity_registry.async_get(state.entity_id) == registered
+    await async_set_inventory(hass, entry, backend, [])
+    assert hass.states.get("todo.maintenance_instructions") is None
+
+
+async def test_user_disabled_instructions_stay_disabled_after_archive_and_restore(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    await async_set_inventory(hass, entry, backend, [instruction_record()])
+    registered = entity_registry.async_get("todo.maintenance_instructions")
+    assert registered is not None
+    entity_registry.async_update_entity(
+        registered.entity_id,
+        disabled_by=er.RegistryEntryDisabler.USER,
+    )
+    await hass.async_block_till_done()
+    await async_set_inventory(hass, entry, backend, [])
+    assert entity_registry.async_get(registered.entity_id) is None
+    await async_set_inventory(hass, entry, backend, [instruction_record()])
+    restored = entity_registry.async_get(registered.entity_id)
+    assert restored is not None and restored.id == registered.id
+    assert restored.disabled_by is er.RegistryEntryDisabler.USER
+    assert hass.states.get(registered.entity_id) is None
+
+
+@pytest.mark.parametrize("unload", [False, True])
+@pytest.mark.parametrize("stage", ["prepare", "added"])
+async def test_inflight_add_does_not_leave_a_list_after_empty_update_or_unload(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    entity_registry: er.EntityRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+    unload: bool,
+    stage: str,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = (
+        MaintenanceInstructions.async_prepare_to_add_to_hass
+        if stage == "prepare"
+        else MaintenanceInstructions.async_added_to_hass
+    )
+
+    async def paused_prepare(entity: MaintenanceInstructions) -> None:
+        entered.set()
+        await release.wait()
+        await original(entity)
+
+    monkeypatch.setattr(
+        MaintenanceInstructions,
+        "async_prepare_to_add_to_hass" if stage == "prepare" else "async_added_to_hass",
+        paused_prepare,
+    )
+    backend.responses[("GET", "/v1/items")] = (
+        200,
+        json.dumps({"items": [instruction_record()], "next_page": None}).encode(),
+        {},
+    )
+    coordinator = entry.runtime_data
+    await coordinator.async_refresh()
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    if unload:
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    else:
+        backend.responses[("GET", "/v1/items")] = (
+            200,
+            json.dumps({"items": [], "next_page": None}).encode(),
+            {},
+        )
+        await coordinator.async_refresh()
+    release.set()
+    await hass.async_block_till_done()
+    assert hass.states.get("todo.maintenance_instructions") is None
+    if not unload:
+        assert (
+            entity_registry.async_get_entity_id(
+                "todo", DOMAIN, f"{entry.entry_id}_instructions"
+            )
+            is None
+        )
+    if unload:
+        # A stale coordinator notification cannot recreate an unloaded list.
+        coordinator.async_update_listeners()
+        await hass.async_block_till_done()
+        assert hass.states.get("todo.maintenance_instructions") is None
+        monkeypatch.setattr(
+            MaintenanceInstructions,
+            "async_prepare_to_add_to_hass"
+            if stage == "prepare"
+            else "async_added_to_hass",
+            original,
+        )
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        assert hass.states.get("todo.maintenance_instructions") is not None
+        await async_set_inventory(hass, entry, backend, [])
+        assert hass.states.get("todo.maintenance_instructions") is None
+
+
+async def test_empty_inventory_has_no_instructions_list(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    assert hass.states.get("todo.maintenance") is not None
+    assert hass.states.get("todo.maintenance_instructions") is None
+    assert (
+        entity_registry.async_get_entity_id(
+            "todo", DOMAIN, f"{entry.entry_id}_instructions"
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("archived", [False, True])
+async def test_upgrade_removes_empty_instructions_registry_and_restored_state(
+    hass: HomeAssistant,
+    backend: Backend,
+    entity_registry: er.EntityRegistry,
+    archived: bool,
+) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={CONF_BACKEND_URL: backend.url, CONF_TOKEN: "test-integration-token"},
+    )
+    entry.add_to_hass(hass)
+    previous = entity_registry.async_get_or_create(
+        "todo",
+        DOMAIN,
+        f"{entry.entry_id}_instructions",
+        config_entry=entry,
+        suggested_object_id="example_instructions",
+        original_name="Example instructions",
+    )
+    previous.write_unavailable_state(hass)
+    assert hass.states.get(previous.entity_id) is not None
+    if archived:
+        backend.responses[("GET", "/v1/items")] = (
+            200,
+            json.dumps(
+                {"items": [instruction_record(archived=True)], "next_page": None}
+            ).encode(),
+            {},
+        )
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entity_registry.async_get(previous.entity_id) is None
+    assert hass.states.get(previous.entity_id) is None
+    assert hass.states.get("todo.maintenance") is not None
 
 
 async def test_native_instruction_reference_is_read_only_and_tracks_refresh(
@@ -121,14 +389,8 @@ async def test_native_instruction_reference_is_read_only_and_tracks_refresh(
         {},
     )
     await entry.runtime_data.async_refresh()
-    references = await hass.services.async_call(
-        "todo",
-        "get_items",
-        {"entity_id": "todo.maintenance_instructions"},
-        blocking=True,
-        return_response=True,
-    )
-    assert entity_items(references, "todo.maintenance_instructions") == []
+    await hass.async_block_till_done()
+    assert hass.states.get("todo.maintenance_instructions") is None
 
 
 @pytest.mark.parametrize("service", ["complete", "set_checklist_step"])
