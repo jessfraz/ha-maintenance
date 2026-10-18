@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- Expose task queries and completion through Home Assistant's Assist LLM API.
+- Return bounded task snapshots with IDs, due dates, occurrences, and revisions so agents can clarify names and use conversational context.
+- Require exact occurrence and revision values for completion, with entity exposure, user permissions, and retry checks enforced by the tools.
+- Add optional blueprints for daily maintenance reminders and overdue alerts.
+
 ## 0.7.0
 
 - Ask local Assist about upcoming, overdue, and next maintenance tasks, or work due today, tomorrow, this week, or next week.

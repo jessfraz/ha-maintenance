@@ -1,0 +1,54 @@
+blueprint:
+  name: Maintenance overdue alert
+  description: >-
+    Notify when the overdue count increases. Decreases, unavailable states, and
+    recovery after startup or an outage do not send notifications.
+  domain: automation
+  source_url: https://github.com/jessfraz/ha-maintenance/blob/main/blueprints/automation/maintenance/overdue_alert.yaml
+  input:
+    overdue_sensor:
+      name: Maintenance overdue sensor
+      description: Choose the Maintenance sensor named Overdue.
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              integration: home_maintenance
+    notify_actions:
+      name: Notification actions
+      description: >-
+        Choose your notification action and use {{ title }} and {{ message }}
+        in its fields. The overdue count is available as {{ count }}.
+      selector:
+        action:
+
+triggers:
+  - trigger: state
+    entity_id: !input overdue_sensor
+    to:
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ trigger.from_state is not none and trigger.to_state is not none
+         and is_number(trigger.from_state.state)
+         and is_number(trigger.to_state.state)
+         and trigger.from_state.state | float >= 0
+         and trigger.to_state.state | float >= 0
+         and trigger.from_state.state | int == trigger.from_state.state | float
+         and trigger.to_state.state | int == trigger.to_state.state | float
+         and trigger.to_state.state | int > trigger.from_state.state | int }}
+
+actions:
+  - variables:
+      count: "{{ trigger.to_state.state | int }}"
+      increase: >-
+        {{ (trigger.to_state.state | int) - (trigger.from_state.state | int) }}
+      title: Maintenance overdue
+  - variables:
+      message: >-
+        {{ count }} {{ 'task' if count == 1 else 'tasks' }} overdue ({{ increase }} new).
+  - sequence: !input notify_actions
+
+mode: queued
+max: 10

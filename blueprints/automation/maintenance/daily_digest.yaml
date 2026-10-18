@@ -1,0 +1,84 @@
+blueprint:
+  name: Maintenance daily digest
+  description: >-
+    Send dated maintenance tasks due today or in the coming days. Empty schedules
+    and unavailable calendars are skipped. Overdue work is not included.
+  domain: automation
+  source_url: https://github.com/jessfraz/ha-maintenance/blob/main/blueprints/automation/maintenance/daily_digest.yaml
+  input:
+    calendar_entity:
+      name: Maintenance calendar
+      selector:
+        entity:
+          filter:
+            - domain: calendar
+              integration: home_maintenance
+    notification_time:
+      name: Notification time
+      default: "08:00:00"
+      selector:
+        time:
+    days_ahead:
+      name: Days to include
+      description: Includes today. Use 1 for today's tasks only.
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 30
+          step: 1
+          mode: box
+          unit_of_measurement: days
+    notify_actions:
+      name: Notification actions
+      description: >-
+        Choose your notification action and use {{ title }} and {{ message }}
+        in its fields. The task count is available as {{ count }}.
+      selector:
+        action:
+
+variables:
+  calendar_entity: !input calendar_entity
+  days_ahead: !input days_ahead
+
+triggers:
+  - trigger: time
+    at: !input notification_time
+
+conditions:
+  - condition: template
+    value_template: >-
+      {{ days_ahead is number and days_ahead is not boolean
+         and days_ahead | int == days_ahead
+         and 1 <= days_ahead <= 30
+         and states(calendar_entity) in ['on', 'off'] }}
+
+actions:
+  - action: calendar.get_events
+    target:
+      entity_id: !input calendar_entity
+    data:
+      start_date_time: "{{ today_at() }}"
+      end_date_time: "{{ today_at() + timedelta(days=days_ahead | int) }}"
+    response_variable: calendar_response
+  - variables:
+      events: "{{ calendar_response.get(calendar_entity, {}).get('events', []) }}"
+      count: "{{ events | count }}"
+  - condition: template
+    value_template: "{{ count > 0 }}"
+  - variables:
+      title: >-
+        {{ 'Maintenance due today' if days_ahead == 1
+           else 'Maintenance due in the next ' ~ (days_ahead | int) ~ ' days' }}
+      message: >-
+        {% set tasks = namespace(lines=[]) %}
+        {% for event in events[:10] %}
+          {% set tasks.lines = tasks.lines + [event.start ~ ': ' ~ event.summary] %}
+        {% endfor %}
+        {% if count > 10 %}
+          {% set tasks.lines = tasks.lines + ['And ' ~ (count - 10) ~ ' more.'] %}
+        {% endif %}
+        {{ tasks.lines | join('\n') }}
+  - sequence: !input notify_actions
+
+mode: single

@@ -20,7 +20,6 @@ from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 from .coordinator import MaintenanceCoordinator
 from .http import MaintenanceView
 from .services import async_register_services
-from .voice import async_register_voice
 
 PLATFORMS = [Platform.CALENDAR, Platform.SENSOR, Platform.TODO]
 type MaintenanceConfigEntry = ConfigEntry[MaintenanceCoordinator]
@@ -60,7 +59,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MaintenanceConfigEntry) 
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    async_register_voice(hass, entry)
     coordinator.async_listen_to_registries()
 
     @callback

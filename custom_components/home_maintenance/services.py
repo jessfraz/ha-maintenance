@@ -51,6 +51,10 @@ class ChecklistStepRequest(TypedDict):
     completed: bool
 
 
+class OccurrenceConflict(HomeAssistantError):
+    """The selected task revision or occurrence is no longer current."""
+
+
 async def async_actor(hass: HomeAssistant, context: Context) -> Actor:
     """Resolve human identity from HA authentication or attribute system work."""
     if context.user_id is None:
@@ -71,7 +75,7 @@ def check_response(response: BackendResponse) -> None:
     if 200 <= response.status < 300:
         return
     if response.status in {409, 412}:
-        raise HomeAssistantError(
+        raise OccurrenceConflict(
             "The task changed or this occurrence was already completed. "
             "Refresh Maintenance before trying again."
         )

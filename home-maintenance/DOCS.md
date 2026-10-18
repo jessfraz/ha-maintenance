@@ -177,32 +177,54 @@ the calendar unavailable instead of returning stale events as current data.
 
 ## Assist
 
-Expose the Maintenance to-do entity to Assist in **Settings → Voice assistants →
-Expose**. The integration adds English commands to Home Assistant's built-in
-conversation agent:
+Expose the Maintenance to-do entity in **Settings → Voice assistants → Expose**.
+In your LLM conversation agent's settings, enable **Device control** (the Assist
+API). Maintenance contributes its tools automatically through Home Assistant's
+`llm.py` platform.
 
-- "What maintenance is coming up?"
-- "What maintenance is overdue?"
-- "What is my next maintenance task?"
-- "What maintenance is due today?" Also accepts tomorrow, this week, or next week.
-- "Complete maintenance task replace the example filter."
+Ask about upcoming or overdue maintenance, work due today or this week, or a
+particular task. The agent can use the returned task snapshots to answer
+follow-up questions and complete the selected task when you ask. Names that
+match several tasks need clarification before completion.
 
-Queries refresh the app's data before answering and read at most five tasks
-with their due dates. Upcoming includes future work beyond the dashboard's
-14-day window; next includes overdue work. Date windows use each task's time
-zone, with weeks running Monday through Sunday. Undated tasks and standing
-instructions are excluded from date queries.
+The tools are:
 
-Completion accepts a task's name or action summary, including a unique partial
-name. If several tasks match, Assist reads their names without completing any.
-Repeat the command with a more specific name. It does not remember "that one"
-or "the first one" between commands. Undated tasks can be completed by name;
-standing instructions cannot.
+- `home_maintenance__query`: active, upcoming, overdue, or next work; today,
+  tomorrow, this week, or next week; optional name filter and a result limit.
+- `home_maintenance__complete`: completes an exact item ID, occurrence ID, and
+  revision returned by a query.
 
-Authenticated users need permission to read or control the exposed to-do
-entity. Voice requests without a user identity are recorded as automation
-actions. Completion uses the same occurrence and revision checks as the
-dashboard; a concurrent change requires a fresh command.
+Queries refresh the app before answering. Results include names, summaries,
+status, due dates, time zones, IDs, and revisions, with a total and a truncation
+flag. Descriptions, instructions, checklists, resource links, and Home Assistant
+registry details are omitted from the tool output.
+
+Upcoming includes future work beyond the dashboard's 14-day window; next
+includes overdue work. Date windows use each task's time zone, with weeks
+running Monday through Sunday. Undated tasks appear in Active. Standing
+instructions cannot be completed.
+
+The tools respect entity exposure and the authenticated user's read/control
+permissions. Requests without a user identity are recorded as automation
+actions. Completion uses the app's occurrence, revision, and retry checks. A
+conflict requires reviewing the current task rather than completing its next
+occurrence automatically.
+
+Use an LLM conversation agent for these tools. Home Assistant's built-in
+sentence agent still supports the native to-do list's commands.
+
+## Notification blueprints
+
+Import a blueprint, create an automation from it, and choose your Maintenance
+entity and notification action:
+
+- [Daily digest](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-maintenance%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fmaintenance%2Fdaily_digest.yaml): choose a time and 1–30 calendar days, including today. The default is 08:00 and seven days. It reads the native calendar, showing up to ten tasks plus the remaining count. Empty and unavailable calendars are skipped; overdue work is excluded.
+- [Overdue alert](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fjessfraz%2Fha-maintenance%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fmaintenance%2Foverdue_alert.yaml): choose the Maintenance **Overdue** sensor. It notifies when the count increases. Decreases, startup, and recovery from an unavailable state do not trigger an alert.
+
+In **Notification actions**, select your notification service and use
+`{{ title }}` and `{{ message }}` in its title and message fields. `{{ count }}`
+contains the full task count for additional actions or templates. The blueprints
+work with any notification action; they do not require an LLM agent.
 
 ## NFC tags
 
@@ -234,7 +256,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.7.0
+  ghcr.io/jessfraz/ha-maintenance:0.8.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its
