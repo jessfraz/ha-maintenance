@@ -5,6 +5,7 @@
 - Close task and edit dialogs when clicking or tapping outside them.
 - Keep edits open while saving and ignore drags that start or end inside a dialog.
 - Keep linked Home Assistant devices and entities on the current HA address when opened through ingress.
+- Add matching app and integration icons, including dark and high-resolution integration variants.
 
 ## 0.6.0
 
