@@ -61,7 +61,7 @@ impl From<TimeZone> for String {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(try_from = "ScheduleFields", into = "ScheduleFields")]
-pub struct Schedule {
+pub struct Interval {
     days: u32,
     months: u32,
     years: u32,
@@ -76,14 +76,14 @@ struct ScheduleFields {
     #[serde(default)]
     years: u32,
 }
-impl TryFrom<ScheduleFields> for Schedule {
+impl TryFrom<ScheduleFields> for Interval {
     type Error = Error;
     fn try_from(value: ScheduleFields) -> Result<Self, Error> {
         Self::new(value.days, value.months, value.years)
     }
 }
-impl From<Schedule> for ScheduleFields {
-    fn from(value: Schedule) -> Self {
+impl From<Interval> for ScheduleFields {
+    fn from(value: Interval) -> Self {
         Self {
             days: value.days,
             months: value.months,
@@ -91,7 +91,7 @@ impl From<Schedule> for ScheduleFields {
         }
     }
 }
-impl Schedule {
+impl Interval {
     pub fn new(days: u32, months: u32, years: u32) -> Result<Self, Error> {
         if days > 36_600 || months > 1_200 || years > 100 || days + months + years == 0 {
             return Err(Error::Invalid(
@@ -112,6 +112,30 @@ impl Schedule {
             .ok_or(Error::Invalid(
                 "next due date is outside the supported calendar",
             ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Schedule {
+    #[default]
+    Once,
+    Standing,
+    Recurring {
+        interval: Interval,
+    },
+}
+impl Schedule {
+    pub fn new(days: u32, months: u32, years: u32) -> Result<Self, Error> {
+        Ok(Self::Recurring {
+            interval: Interval::new(days, months, years)?,
+        })
+    }
+    pub fn next(self, from: NaiveDate) -> Result<NaiveDate, Error> {
+        match self {
+            Self::Recurring { interval } => interval.next(from),
+            _ => Err(Error::Invalid("only recurring tasks have a next due date")),
+        }
     }
 }
 
@@ -161,6 +185,7 @@ pub struct Definition {
     pub location: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    #[serde(default)]
     pub schedule: Schedule,
     #[serde(default)]
     pub instructions: Vec<String>,
@@ -274,14 +299,15 @@ pub fn validate_date(date: NaiveDate) -> Result<(), Error> {
 #[serde(deny_unknown_fields)]
 pub struct CreateItem {
     pub id: ItemId,
-    pub due: NaiveDate,
+    #[serde(default)]
+    pub due: Option<NaiveDate>,
     #[serde(flatten)]
     pub definition: Definition,
 }
 impl CreateItem {
     pub fn validate(&self) -> Result<(), Error> {
         self.definition.validate()?;
-        validate_date(self.due)
+        self.due.map(validate_date).transpose().map(|_| ())
     }
 }
 
@@ -342,7 +368,7 @@ pub struct UpdateItem {
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub schedule: Change<Schedule>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
-    pub due: Change<NaiveDate>,
+    pub due: Change<Option<NaiveDate>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub instructions: Change<Vec<String>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
@@ -355,7 +381,11 @@ pub struct UpdateItem {
     pub reorder_url: Change<Option<String>>,
 }
 impl UpdateItem {
-    pub fn apply(self, definition: &mut Definition, due: &mut NaiveDate) -> Result<(), Error> {
+    pub fn apply(
+        self,
+        definition: &mut Definition,
+        due: &mut Option<NaiveDate>,
+    ) -> Result<(), Error> {
         self.name.apply(&mut definition.name);
         self.summary.apply(&mut definition.summary);
         self.description.apply(&mut definition.description);
@@ -370,7 +400,7 @@ impl UpdateItem {
         self.resources.apply(&mut definition.resources);
         self.reorder_url.apply(&mut definition.reorder_url);
         definition.validate()?;
-        validate_date(*due)
+        due.map(validate_date).transpose().map(|_| ())
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -404,18 +434,20 @@ impl Actor {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Occurrence {
     pub id: Uuid,
-    pub due: NaiveDate,
+    pub due: Option<NaiveDate>,
     pub checklist: Vec<ChecklistStepState>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Completion {
     pub id: Uuid,
     pub item_id: ItemId,
-    pub occurrence_id: Uuid,
-    pub completed_at: DateTime<Utc>,
-    pub actor: Actor,
-    pub previous_due: NaiveDate,
-    pub next_due: NaiveDate,
+    pub occurrence_id: Option<Uuid>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub actor: Option<Actor>,
+    pub previous_due: Option<NaiveDate>,
+    pub next_due: Option<NaiveDate>,
+    #[serde(default)]
+    pub source: Option<SourceRef>,
     pub checklist: Vec<ChecklistStepState>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -425,6 +457,10 @@ pub struct Item {
     pub definition: Definition,
     pub revision: i64,
     pub archived: bool,
+    #[serde(default)]
+    pub status: ItemStatus,
+    #[serde(default)]
+    pub source: Option<SourceRef>,
     pub occurrence: Occurrence,
     pub last_completion: Option<Completion>,
 }
@@ -534,6 +570,136 @@ pub struct SetChecklistStep {
     pub occurrence_id: Uuid,
     pub completed: bool,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemStatus {
+    #[default]
+    NeedsAction,
+    Completed,
+}
+impl ItemStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsAction => "needs_action",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+/// Opaque source identity. Values are retained exactly, including case and spacing.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceRef {
+    pub system: String,
+    pub collection: String,
+    pub id: String,
+}
+impl SourceRef {
+    pub fn validate(&self) -> Result<(), Error> {
+        for value in [&self.system, &self.collection, &self.id] {
+            text(value, 500)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedCompletion {
+    pub id: Option<Uuid>,
+    pub occurrence_id: Option<Uuid>,
+    pub source: Option<SourceRef>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub actor: Option<Actor>,
+    pub previous_due: Option<NaiveDate>,
+    pub next_due: Option<NaiveDate>,
+    #[serde(default)]
+    pub checklist: Vec<ChecklistStepState>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MigrationItem {
+    pub source: SourceRef,
+    pub item: CreateItem,
+    #[serde(default)]
+    pub status: ItemStatus,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub history: Vec<ImportedCompletion>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Migration {
+    pub items: Vec<MigrationItem>,
+}
+impl Migration {
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.items.is_empty() || self.items.len() > 200 {
+            return Err(Error::Invalid("migration requires 1..200 items"));
+        }
+        let mut total = 0;
+        for item in &self.items {
+            item.source.validate()?;
+            item.item.validate()?;
+            total += item.history.len();
+            if total > 10_000 {
+                return Err(Error::Invalid(
+                    "migration supports at most 10000 history events",
+                ));
+            }
+            for event in &item.history {
+                if let Some(source) = &event.source {
+                    source.validate()?;
+                }
+                for due in [event.previous_due, event.next_due].into_iter().flatten() {
+                    validate_date(due)?;
+                }
+                if let Some(actor) = &event.actor {
+                    match actor {
+                        Actor::User { id, name } => {
+                            text(id, 200)?;
+                            text(name, 200)?;
+                        }
+                        Actor::System { name, .. } => text(name, 200)?,
+                    }
+                }
+                if event.checklist.len() > 100 {
+                    return Err(Error::Invalid("at most 100 checklist steps per event"));
+                }
+                let mut steps = BTreeSet::new();
+                for step in &event.checklist {
+                    text(&step.summary, 200)?;
+                    if !steps.insert(step.id) {
+                        return Err(Error::Invalid("history checklist step ids must be unique"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationAction {
+    Created,
+    Unchanged,
+    Conflict,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationMapping {
+    pub source: SourceRef,
+    pub target_id: ItemId,
+    pub action: MigrationAction,
+    pub conflicts: Vec<String>,
+    pub history_events: usize,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct MigrationReport {
+    pub items: Vec<MigrationMapping>,
+    pub applicable: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportCatalog {

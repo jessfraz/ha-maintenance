@@ -18,57 +18,51 @@
   },
   "$defs": {
     "schedule": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "days": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 36600
-        },
-        "months": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 1200
-        },
-        "years": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 100
-        }
-      },
-      "anyOf": [
+      "oneOf": [
         {
+          "type": "object",
+          "additionalProperties": false,
           "required": [
-            "days"
+            "kind"
           ],
           "properties": {
-            "days": {
-              "minimum": 1
+            "kind": {
+              "const": "once"
             }
           }
         },
         {
+          "type": "object",
+          "additionalProperties": false,
           "required": [
-            "months"
+            "kind"
           ],
           "properties": {
-            "months": {
-              "minimum": 1
+            "kind": {
+              "const": "standing"
             }
           }
         },
         {
+          "type": "object",
+          "additionalProperties": false,
           "required": [
-            "years"
+            "kind",
+            "interval"
           ],
           "properties": {
-            "years": {
-              "minimum": 1
+            "kind": {
+              "const": "recurring"
+            },
+            "interval": {
+              "$ref": "#/$defs/interval"
             }
           }
         }
-      ]
+      ],
+      "default": {
+        "kind": "once"
+      }
     },
     "spec": {
       "type": "object",
@@ -140,9 +134,7 @@
         "id",
         "name",
         "summary",
-        "timezone",
-        "due",
-        "schedule"
+        "timezone"
       ],
       "properties": {
         "id": {
@@ -178,9 +170,12 @@
           "description": "IANA time zone name."
         },
         "due": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "format": "date",
-          "description": "Due date between 0001-01-01 and 9999-12-30 inclusive. The following day must be representable as the exclusive end of an all-day calendar event."
+          "description": "Optional all-day due date between 0001-01-01 and 9999-12-30. Omit or use null when unknown; never substitute today."
         },
         "schedule": {
           "$ref": "#/$defs/schedule"
@@ -242,6 +237,59 @@
           "maxItems": 100
         }
       }
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "days": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 36600
+        },
+        "months": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1200
+        },
+        "years": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "days"
+          ],
+          "properties": {
+            "days": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "months"
+          ],
+          "properties": {
+            "months": {
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "years"
+          ],
+          "properties": {
+            "years": {
+              "minimum": 1
+            }
+          }
+        }
+      ]
     }
   }
 }

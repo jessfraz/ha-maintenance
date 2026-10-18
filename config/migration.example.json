@@ -1,0 +1,36 @@
+{
+  "items": [
+    {
+      "source": {"system": "example", "collection": "example-todos", "id": "EXAMPLE-completed-001"},
+      "item": {
+        "id": "example-once",
+        "name": "Example inspection",
+        "summary": "Inspect the example equipment",
+        "timezone": "Etc/UTC",
+        "due": null,
+        "schedule": {"kind": "once"}
+      },
+      "status": "completed",
+      "history": [
+        {
+          "source": {"system": "example", "collection": "example-history", "id": "EXAMPLE-event-001"},
+          "completed_at": "2031-01-15T12:00:00Z",
+          "actor": null,
+          "occurrence_id": null,
+          "previous_due": null,
+          "next_due": null
+        }
+      ]
+    },
+    {
+      "source": {"system": "example", "collection": "example-todos", "id": "EXAMPLE-standing-001"},
+      "item": {
+        "id": "example-standing",
+        "name": "Example workspace",
+        "summary": "Tidy the example workspace",
+        "timezone": "Etc/UTC",
+        "schedule": {"kind": "standing"}
+      }
+    }
+  ]
+}

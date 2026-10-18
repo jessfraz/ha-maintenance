@@ -18,6 +18,14 @@ def main() -> None:
         (root / "custom_components/home_maintenance/manifest.json").read_text()
     )
     app = (root / "home-maintenance/config.yaml").read_text()
+    docker_versions = set(
+        re.findall(
+            r"ghcr\.io/jessfraz/ha-maintenance:([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)",
+            (root / "home-maintenance/DOCS.md").read_text(),
+        )
+    )
+    if len(docker_versions) != 1:
+        raise SystemExit("Docker example needs one concrete release version")
     app_version = re.search(r'^version: "([^"]+)"$', app, re.MULTILINE)
     if app_version is None:
         raise SystemExit("App manifest needs a quoted version")
@@ -26,6 +34,7 @@ def main() -> None:
         "pyproject.toml": python["project"]["version"],
         "integration manifest": integration["version"],
         "app manifest": app_version[1],
+        "Docker example": docker_versions.pop(),
     }
     if len(sys.argv) > 2:
         raise SystemExit("Usage: check-release-version [vVERSION]")

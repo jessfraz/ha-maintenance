@@ -63,6 +63,7 @@
               <option value="active">Active</option>
               <option value="overdue">Overdue</option>
               <option value="due_soon">Due in 14 days</option>
+              <option value="completed">Completed</option>
               <option value="archived">Archived</option>
             </select></label
           >
@@ -184,11 +185,10 @@
           </div>
           <div class="columns">
             <label for="due"
-              >Next due<input
+              >Due date (optional)<input
                 id="due"
                 name="due"
                 type="date"
-                required
                 min="0001-01-01"
                 max="9999-12-30"
               ></label
@@ -207,8 +207,17 @@
             >
           </div>
           <fieldset class="schedule">
-            <legend>Repeat after completion</legend>
-            <div class="columns schedule-fields">
+            <legend>Schedule</legend>
+            <label for="schedule-kind">Task type
+              <select id="schedule-kind" name="schedule-kind">
+                <option value="once">One-off</option>
+                <option value="standing">Standing</option>
+                <option value="recurring">Recurring</option>
+              </select>
+            </label>
+            <p id="schedule-help" class="field-help"></p>
+            <div id="interval-fields" hidden>
+              <div class="columns schedule-fields">
               <label for="years"
                 >Years<input
                   id="years"
@@ -240,14 +249,15 @@
                   max="36600"
                   step="1"
                   required
-                  value="30"
+                  value="0"
                 ></label
               >
+              </div>
+              <p class="field-help">
+                Repeat after completion. Calendar months and years retain their
+                calendar dates.
+              </p>
             </div>
-            <p class="field-help">
-              Choose at least one day, month, or year. Calendar months and years
-              stay on a calendar cadence.
-            </p>
           </fieldset>
           <section
             class="editor-section"

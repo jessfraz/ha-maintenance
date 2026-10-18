@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Literal
 
 import pytest
 from aiohttp import web
@@ -52,7 +53,8 @@ def item_record(
     summary: str = "Replace filter",
     description: str | None = None,
     location: str | None = None,
-    due: str = "2026-10-15",
+    due: str | None = "2026-10-15",
+    status: Literal["needs_action", "completed"] = "needs_action",
     archived: bool = False,
     checklist: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -68,13 +70,17 @@ def item_record(
         "timezone": "UTC",
         "location": location,
         "group": None,
-        "schedule": {"days": 0, "months": 3, "years": 0},
+        "schedule": {
+            "kind": "recurring",
+            "interval": {"days": 0, "months": 3, "years": 0},
+        },
         "instructions": ["Turn off the appliance", "Replace the filter"],
         "specs": [],
         "resources": [],
         "reorder_url": None,
         "revision": revision,
         "archived": archived,
+        "status": status,
         "occurrence": {
             "id": occurrence_id,
             "due": due,

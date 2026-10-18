@@ -8,9 +8,12 @@
       "timezone": "Etc/UTC",
       "due": "2031-02-17",
       "schedule": {
-        "days": 47,
-        "months": 0,
-        "years": 0
+        "kind": "recurring",
+        "interval": {
+          "days": 47,
+          "months": 0,
+          "years": 0
+        }
       },
       "location": "Example room",
       "group": "Examples",
@@ -54,9 +57,12 @@
       "timezone": "Etc/UTC",
       "due": "2031-08-17",
       "schedule": {
-        "days": 0,
-        "months": 5,
-        "years": 0
+        "kind": "recurring",
+        "interval": {
+          "days": 0,
+          "months": 5,
+          "years": 0
+        }
       },
       "location": "Example room",
       "group": "Examples",

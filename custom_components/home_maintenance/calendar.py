@@ -13,6 +13,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import MaintenanceCoordinator
+from .models import ItemStatus
 
 
 async def async_setup_entry(
@@ -42,21 +43,24 @@ class MaintenanceCalendar(CoordinatorEntity[MaintenanceCoordinator], CalendarEnt
         )
 
     def _events(self) -> list[CalendarEvent]:
-        """Project current occurrences; completion alone schedules successors."""
-        return [
-            CalendarEvent(
-                start=item.due,
-                end=item.due + timedelta(days=1),
-                summary=item.summary,
-                description=item.task_description,
-                location=item.location,
-                uid=str(item.occurrence_id),
+        """Project known dates for active occurrences without inventing a schedule."""
+        events: list[CalendarEvent] = []
+        for item in self.coordinator.data.items:
+            if item.archived or item.status is ItemStatus.COMPLETED or item.due is None:
+                continue
+            events.append(
+                CalendarEvent(
+                    start=item.due,
+                    end=item.due + timedelta(days=1),
+                    summary=item.summary,
+                    description=item.task_description,
+                    location=item.location,
+                    uid=str(item.occurrence_id),
+                )
             )
-            for item in sorted(
-                self.coordinator.data.items, key=lambda item: (item.due, item.id)
-            )
-            if not item.archived
-        ]
+        return sorted(
+            events, key=lambda event: (event.start_datetime_local, event.uid or "")
+        )
 
     @property
     def event(self) -> CalendarEvent | None:

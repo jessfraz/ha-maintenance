@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import MaintenanceCoordinator
+from .models import ItemStatus
 from .services import async_actor, async_complete
 
 
@@ -90,8 +91,15 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             TodoItem(
                 uid=str(item.occurrence_id),
                 summary=item.summary,
-                status=TodoItemStatus.NEEDS_ACTION,
+                status=(
+                    TodoItemStatus.COMPLETED
+                    if item.status is ItemStatus.COMPLETED
+                    else TodoItemStatus.NEEDS_ACTION
+                ),
                 due=item.due,
+                completed=(
+                    item.completed_at if item.status is ItemStatus.COMPLETED else None
+                ),
                 description=item.task_description,
             )
             for item in self.coordinator.data.items
@@ -107,7 +115,9 @@ class MaintenanceTodo(CoordinatorEntity[MaintenanceCoordinator], TodoListEntity)
             (
                 current
                 for current in self.coordinator.data.items
-                if not current.archived and str(current.occurrence_id) == item.uid
+                if not current.archived
+                and current.status is ItemStatus.NEEDS_ACTION
+                and str(current.occurrence_id) == item.uid
             ),
             None,
         )

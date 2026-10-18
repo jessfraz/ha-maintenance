@@ -19,9 +19,9 @@ use uuid::Uuid;
 use crate::{
     installation::{Installation, InstallationReport, PresenceReport},
     models::{
-        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Page, Reorder,
-        ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder, SetChecklistStep, Summary,
-        SystemActor, UpdateItem,
+        Actor, CompleteItem, Completion, CreateItem, ImportCatalog, Item, ItemId, Migration,
+        MigrationReport, Page, Reorder, ReorderItem, ReorderReceipt, ReorderStatus, ResolveReorder,
+        SetChecklistStep, Summary, SystemActor, UpdateItem,
     },
     store::Store,
 };
@@ -357,6 +357,40 @@ async fn items_import(
     administrator(&request)?;
     Ok(private(
         request.context().store.import(body.into_inner()).await?,
+    ))
+}
+/// Read-only, target-aware mapping and conflict report for a migration.
+#[endpoint {method=POST,path="/v1/migrations/preview",tags=["migrations"]}]
+async fn migration_preview(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<Migration>,
+) -> Result<HttpResponseHeaders<HttpResponseOk<MigrationReport>, PrivateHeaders>, HttpError> {
+    administrator(&request)?;
+    Ok(private(
+        request
+            .context()
+            .store
+            .preview_migration(body.into_inner())
+            .await?,
+    ))
+}
+/// Atomically preserve source definitions, status, identities and history.
+#[endpoint {method=POST,path="/v1/migrations",tags=["migrations"]}]
+async fn migration_apply(
+    request: RequestContext<Arc<Context>>,
+    body: TypedBody<Migration>,
+) -> Result<HttpResponseHeaders<HttpResponseCreated<MigrationReport>, PrivateHeaders>, HttpError> {
+    let principal = administrator(&request)?;
+    let report = request
+        .context()
+        .store
+        .migrate(body.into_inner(), &principal.actor, idempotency(&request)?)
+        .await?;
+    Ok(HttpResponseHeaders::new(
+        HttpResponseCreated(report),
+        PrivateHeaders {
+            cache_control: "no-store".into(),
+        },
     ))
 }
 #[endpoint {method=GET,path="/v1/items/{id}",tags=["items"]}]
@@ -714,10 +748,12 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 25] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 27] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
+        migration_preview.into(),
+        migration_apply.into(),
         item_get.into(),
         item_update.into(),
         item_complete.into(),
@@ -747,7 +783,7 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     Ok(api)
 }
 pub fn openapi() -> Result<serde_json::Value> {
-    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local maintenance definitions, recurring occurrences, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.").json().map_err(Into::into)
+    description()?.openapi("Maintenance API",semver::Version::parse(env!("CARGO_PKG_VERSION"))?).description("Local one-off, standing and recurring maintenance tasks, source-preserving migrations, completion history and durable reorder requests. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.").json().map_err(Into::into)
 }
 pub fn start(bind: SocketAddr, context: Arc<Context>) -> Result<HttpServer<Arc<Context>>> {
     start_with_logger(bind, context, crate::logging::logger())

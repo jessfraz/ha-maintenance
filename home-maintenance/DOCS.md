@@ -41,13 +41,19 @@ a running app alone does not establish that pairing succeeded.
 ## Add items
 
 Use the dashboard or authenticated API to create an item. Give it a permanent
-ID, a name, an action summary, time zone, due date, and recurrence. The name
+ID, a name, an action summary, and time zone. A due date is optional. The name
 identifies the thing, such as "Example air filter"; the summary describes the
 work, such as "Replace the example air filter". A description, checklist,
 instructions, specifications, resource links, group, location, and reorder link
 are optional. Summaries must be nonblank and fit within 200 UTF-8 bytes.
 Descriptions may contain up to 16,000 UTF-8 bytes and must be nonblank when
 supplied.
+
+Choose one-off, standing, or recurring work. One-off completion closes the
+task. Standing completion records the work and starts a fresh undated
+occurrence. Recurring completion uses a positive calendar interval from the
+actual completion date. Leave an unknown due date blank; the service does not
+substitute today.
 
 Each checklist template has up to 100 steps with unique, stable UUIDs and
 nonblank summaries of up to 200 UTF-8 bytes. Checking a step saves the actor
@@ -60,9 +66,20 @@ repository's fictional `config/items.example.json`. Import is atomic and
 rejects existing IDs; it is an admission operation rather than continuous
 catalog reconciliation. Current schedules and history belong to SQLite.
 
+Existing todos and historical completions use the separate
+`POST /v1/migrations/preview` and `POST /v1/migrations` endpoints with the owner
+credential. Preview reports source-to-target mappings and every conflict
+without writing data. Apply checks the complete batch again and requires an
+`Idempotency-Key`; a conflict rejects the whole batch. Source IDs, status,
+known completion timestamps, and supplied history are retained. Unknown dates,
+actors, and times stay unknown. Import does not complete work or calculate
+replacement dates. See the [migration contract](../README.md#migrating-existing-tasks)
+and the fictional `config/migration.example.json` before preparing a mapping.
+Retain the original export and existing todos until that mapping is reviewed.
+
 Completing an item records the authenticated Home Assistant user when
 available. Automations are recorded as system actions. The service schedules
-the next occurrence atomically. Explicit completion is allowed with unchecked
+the next occurrence atomically for repeating work. Explicit completion is allowed with unchecked
 steps: history records the checklist exactly as it was, and the new occurrence
 starts with every step unchecked. A retry cannot silently complete another
 occurrence. Concurrent edits report a conflict for review.
@@ -81,9 +98,11 @@ occurrence or revision is rejected rather than applying the change to new work.
 ## Calendar
 
 Select `calendar.maintenance` in a Home Assistant calendar card or calendar
-automation. It shows active tasks as all-day events on their current due date,
+automation. It shows active, dated tasks as all-day events on their current due date,
 with the action summary, description, instructions, checklist progress, and
-location. Ordinary authenticated users can read the calendar.
+location. Undated, completed, and archived tasks are excluded. Ordinary
+authenticated users can read the calendar. The native to-do list still shows
+undated work and completed items with their known completion timestamps.
 
 Dates use Home Assistant's local calendar day. Overdue work keeps its original
 date; use the to-do list or overdue sensor to track unfinished tasks. Archiving
@@ -121,7 +140,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.1.0
+  ghcr.io/jessfraz/ha-maintenance:0.3.0
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

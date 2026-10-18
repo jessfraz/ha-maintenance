@@ -80,7 +80,7 @@ impl Fixture {
 fn input(id: &str) -> CreateItem {
     CreateItem {
         id: ItemId::try_from(id.to_owned()).unwrap(),
-        due: NaiveDate::from_ymd_opt(2031, 2, 17).unwrap(),
+        due: Some(NaiveDate::from_ymd_opt(2031, 2, 17).unwrap()),
         definition: Definition {
             name: "Example filter".into(),
             summary: "Replace the example filter".into(),
@@ -149,7 +149,7 @@ async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
     let last_day = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
     let last_due = NaiveDate::from_ymd_opt(9999, 12, 30).unwrap();
     let mut invalid = input("example-invalid-date");
-    invalid.due = last_day;
+    invalid.due = Some(last_day);
     let response = f
         .client
         .post(format!("{}/v1/items", f.origin))
@@ -162,7 +162,7 @@ async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
     let mut valid = input("example-last-due");
-    valid.due = last_due;
+    valid.due = Some(last_due);
     let response = f
         .client
         .post(format!("{}/v1/items", f.origin))
@@ -180,14 +180,14 @@ async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
         .bearer_auth(OWNER)
         .header("If-Match", format!("\"{}\"", item.revision))
         .json(&UpdateItem {
-            due: Change(Some(last_day)),
+            due: Change(Some(Some(last_day))),
             ..UpdateItem::default()
         })
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(f.get(item.id.as_ref()).await.occurrence.due, last_due);
+    assert_eq!(f.get(item.id.as_ref()).await.occurrence.due, Some(last_due));
 
     let response = f
         .client
@@ -549,19 +549,22 @@ async fn completion_is_atomic_replayable_and_scoped_to_one_occurrence() {
     assert_ne!(first.occurrence.id, before.occurrence.id);
     assert_eq!(first.revision, before.revision + 1);
     let event = first.last_completion.as_ref().unwrap();
-    assert_eq!(event.occurrence_id, before.occurrence.id);
+    assert_eq!(event.occurrence_id, Some(before.occurrence.id));
     assert_eq!(
         event.next_due,
-        first
-            .definition
-            .schedule
-            .next(
-                event
-                    .completed_at
-                    .with_timezone(&first.definition.timezone.0)
-                    .date_naive()
-            )
-            .unwrap()
+        Some(
+            first
+                .definition
+                .schedule
+                .next(
+                    event
+                        .completed_at
+                        .unwrap()
+                        .with_timezone(&first.definition.timezone.0)
+                        .date_naive()
+                )
+                .unwrap()
+        )
     );
     assert_eq!(
         complete(&f, &before, "different-request").await.status(),
@@ -891,7 +894,7 @@ async fn bearer_auth_never_trusts_forged_ingress_or_owner_actor_headers() {
     let result: Item = response.json().await.unwrap();
     assert!(matches!(
         result.last_completion.unwrap().actor,
-        Actor::System { .. }
+        Some(Actor::System { .. })
     ));
     f.finish().await;
 }
@@ -944,7 +947,7 @@ async fn integration_permissions_require_authenticated_actor_and_admin_assertion
     assert_eq!(response.status(), StatusCode::OK);
     let result: Item = response.json().await.unwrap();
     assert!(
-        matches!(result.last_completion.unwrap().actor,Actor::User {id,..} if id=="ha:example-user")
+        matches!(result.last_completion.unwrap().actor,Some(Actor::User {id,..}) if id=="ha:example-user")
     );
     let system: System = f
         .client
@@ -1805,4 +1808,648 @@ async fn reorder_lost_response_survives_a_real_backend_process_crash_and_restart
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].request, original);
     restarted.crash();
+}
+
+fn migration_item(id: &str) -> home_maintenance::models::MigrationItem {
+    use home_maintenance::models::{ItemStatus, MigrationItem, SourceRef};
+    let mut definition = input(id);
+    definition.due = None;
+    definition.definition.schedule = Schedule::Once;
+    MigrationItem {
+        source: SourceRef {
+            system: "example-source".into(),
+            collection: "example-list".into(),
+            id: format!("Opaque {id} / original"),
+        },
+        item: definition,
+        status: ItemStatus::NeedsAction,
+        archived: false,
+        history: vec![],
+    }
+}
+async fn migration_request(
+    f: &Fixture,
+    input: &home_maintenance::models::Migration,
+    preview: bool,
+    key: &str,
+) -> Response {
+    f.client
+        .post(format!(
+            "{}/v1/migrations{}",
+            f.origin,
+            if preview { "/preview" } else { "" }
+        ))
+        .bearer_auth(OWNER)
+        .header("Idempotency-Key", key)
+        .json(input)
+        .send()
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn unknown_due_once_standing_and_recurring_have_distinct_completion_lifecycles() {
+    use home_maintenance::models::ItemStatus;
+    let f = Fixture::new().await;
+    for (id, schedule) in [
+        ("example-once", Schedule::Once),
+        ("example-standing", Schedule::Standing),
+        ("example-recurring", Schedule::new(10, 0, 0).unwrap()),
+    ] {
+        let mut definition = input(id);
+        definition.due = None;
+        definition.definition.schedule = schedule;
+        let response = f
+            .client
+            .post(format!("{}/v1/items", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", id)
+            .json(&definition)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "{}",
+            response.text().await.unwrap()
+        );
+        let item: Item = response.json().await.unwrap();
+        assert_eq!(item.occurrence.due, None);
+        assert_eq!(item.status, ItemStatus::NeedsAction);
+        let response = complete(&f, &item, &format!("complete-{id}")).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{}",
+            response.text().await.unwrap()
+        );
+        let completed: Item = response.json().await.unwrap();
+        let event = completed.last_completion.as_ref().unwrap();
+        assert!(event.completed_at.is_some());
+        assert!(event.actor.is_some());
+        assert_eq!(event.previous_due, None);
+        match schedule {
+            Schedule::Once => {
+                assert_eq!(completed.status, ItemStatus::Completed);
+                assert_eq!(completed.occurrence.id, item.occurrence.id);
+                assert_eq!(event.next_due, None);
+                assert_eq!(
+                    complete(&f, &completed, "complete-closed").await.status(),
+                    StatusCode::CONFLICT
+                );
+                assert_eq!(
+                    set_step(&f, &completed, Uuid::from_u128(1), true, "check-closed")
+                        .await
+                        .status(),
+                    StatusCode::CONFLICT
+                );
+            }
+            Schedule::Standing => {
+                assert_eq!(completed.status, ItemStatus::NeedsAction);
+                assert_ne!(completed.occurrence.id, item.occurrence.id);
+                assert_eq!(completed.occurrence.due, None);
+                assert_eq!(event.next_due, None);
+            }
+            Schedule::Recurring { interval } => {
+                assert_eq!(completed.status, ItemStatus::NeedsAction);
+                assert_ne!(completed.occurrence.id, item.occurrence.id);
+                assert_eq!(
+                    completed.occurrence.due,
+                    Some(
+                        interval
+                            .next(
+                                event
+                                    .completed_at
+                                    .unwrap()
+                                    .with_timezone(&completed.definition.timezone.0)
+                                    .date_naive()
+                            )
+                            .unwrap()
+                    )
+                );
+            }
+        }
+        let replay: Item = complete(&f, &item, &format!("complete-{id}"))
+            .await
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&completed).unwrap(),
+            serde_json::to_vec(&replay).unwrap()
+        );
+    }
+    let summary = f.store.summary().await.unwrap();
+    assert_eq!(summary.active, 2);
+    assert_eq!(summary.due_soon, 1);
+    assert_eq!(summary.overdue, 0);
+    assert_eq!(summary.completed, 3);
+    // Omitted schedule defaults to a once task, and omitted due stays unknown.
+    let response = f.client.post(format!("{}/v1/items",f.origin)).bearer_auth(OWNER).header("Idempotency-Key","minimal-default")
+        .header("Content-Type","application/json").body(r#"{"id":"example-default","name":"Example","summary":"Inspect example","timezone":"Etc/UTC"}"#).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let item: Item = response.json().await.unwrap();
+    assert_eq!(item.definition.schedule, Schedule::Once);
+    assert_eq!(item.occurrence.due, None);
+    f.finish().await;
+}
+#[tokio::test]
+async fn dated_then_unknown_pagination_and_due_clearing_are_null_safe() {
+    let f = Fixture::new().await;
+    for (id, due) in [
+        ("example-undated-a", None),
+        ("example-early", Some("2031-01-01")),
+        ("example-undated-b", None),
+        ("example-late", Some("2032-01-01")),
+    ] {
+        let mut item = input(id);
+        item.due = due.map(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap());
+        f.store
+            .create(
+                item,
+                &Actor::System {
+                    id: home_maintenance::models::SystemActor::Owner,
+                    name: "Owner credential".into(),
+                },
+                id,
+            )
+            .await
+            .unwrap();
+    }
+    let mut cursor = None;
+    let mut ids = Vec::new();
+    loop {
+        let mut request = f
+            .client
+            .get(format!("{}/v1/items?limit=1", f.origin))
+            .bearer_auth(OWNER);
+        if let Some(value) = &cursor {
+            request = request.query(&[("page_token", value)]);
+        }
+        let page: Page<Item> = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.extend(page.items.iter().map(|item| item.id.as_ref().to_owned()));
+        cursor = page.next_page;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        ids,
+        [
+            "example-early",
+            "example-late",
+            "example-undated-a",
+            "example-undated-b"
+        ]
+    );
+    let early = f.get("example-early").await;
+    let response = f
+        .client
+        .patch(format!("{}/v1/items/example-early", f.origin))
+        .bearer_auth(OWNER)
+        .header("If-Match", format!("\"{}\"", early.revision))
+        .json(&UpdateItem {
+            due: Change(Some(None)),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cleared: Item = response.json().await.unwrap();
+    assert_eq!(cleared.occurrence.due, None);
+    assert_eq!(f.store.summary().await.unwrap().active, 4);
+    f.finish().await;
+}
+#[tokio::test]
+async fn migration_preview_apply_history_and_replays_preserve_known_and_unknown_facts() {
+    use home_maintenance::models::{
+        ImportedCompletion, ItemStatus, Migration, MigrationAction, MigrationReport, SourceRef,
+    };
+    let f = Fixture::new().await;
+    let mut active = migration_item("example-migrated");
+    active.item.definition.schedule = Schedule::Standing;
+    let known_time = chrono::DateTime::parse_from_rfc3339("2025-02-03T04:05:06+02:00")
+        .unwrap()
+        .to_utc();
+    let event_id = Uuid::from_u128(1234);
+    let event_occurrence = Uuid::from_u128(5678);
+    active.history = vec![
+        ImportedCompletion {
+            id: Some(event_id),
+            occurrence_id: Some(event_occurrence),
+            source: Some(SourceRef {
+                system: "example-source".into(),
+                collection: "history".into(),
+                id: "Original event / AbC".into(),
+            }),
+            completed_at: Some(known_time),
+            ..Default::default()
+        },
+        ImportedCompletion::default(),
+    ];
+    let mut closed = migration_item("example-closed");
+    closed.status = ItemStatus::Completed;
+    let input = Migration {
+        items: vec![active.clone(), closed.clone()],
+    };
+    let preview = migration_request(&f, &input, true, "unused-preview").await;
+    assert_eq!(preview.status(), StatusCode::OK);
+    assert_eq!(preview.headers()["cache-control"], "no-store");
+    let preview: MigrationReport = preview.json().await.unwrap();
+    assert!(preview.applicable);
+    assert!(
+        preview
+            .items
+            .iter()
+            .all(|item| item.action == MigrationAction::Created)
+    );
+    for (table, query) in [
+        ("items", "SELECT count(*) FROM items"),
+        ("completions", "SELECT count(*) FROM completions"),
+        (
+            "migration_sources",
+            "SELECT count(*) FROM migration_sources",
+        ),
+        ("idempotency", "SELECT count(*) FROM idempotency"),
+    ] {
+        let rows: i64 = sqlx::query_scalar(query)
+            .fetch_one(f.store.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "preview wrote {table}");
+    }
+    // Concurrent retries model a response lost before the client could receive it.
+    let (first, retry) = tokio::join!(
+        migration_request(&f, &input, false, "migration-attempt"),
+        migration_request(&f, &input, false, "migration-attempt")
+    );
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(retry.status(), StatusCode::CREATED);
+    let receipt: MigrationReport = first.json().await.unwrap();
+    assert_eq!(receipt, retry.json::<MigrationReport>().await.unwrap());
+    let item = f.get("example-migrated").await;
+    assert_eq!(item.source, Some(active.source));
+    assert_eq!(item.status, ItemStatus::NeedsAction);
+    assert_eq!(item.occurrence.due, None);
+    let newest = item.last_completion.as_ref().unwrap();
+    assert_eq!(newest.completed_at, None);
+    assert_eq!(newest.actor, None);
+    assert_eq!(newest.occurrence_id, None);
+    assert_eq!(newest.previous_due, None);
+    assert_eq!(newest.next_due, None);
+    let page: Page<Completion> = f
+        .client
+        .get(format!("{}/v1/items/example-migrated/events", f.origin))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 2);
+    let known = &page.items[1];
+    assert_eq!(known.id, event_id);
+    assert_eq!(known.occurrence_id, Some(event_occurrence));
+    assert_eq!(known.completed_at, Some(known_time));
+    assert_eq!(known.actor, None);
+    assert_eq!(known.source, active.history[0].source);
+    let completed = f.get("example-closed").await;
+    assert_eq!(completed.status, ItemStatus::Completed);
+    assert_eq!(completed.occurrence.due, None);
+    assert!(completed.last_completion.is_none());
+    let history: Page<Completion> = f
+        .client
+        .get(format!("{}/v1/items/example-closed/events", f.origin))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(history.items.is_empty());
+    assert_eq!(
+        complete(&f, &completed, "closed-no-event").await.status(),
+        StatusCode::CONFLICT
+    );
+    let summary = f.store.summary().await.unwrap();
+    assert_eq!(summary.active, 1);
+    assert_eq!(summary.completed, 2);
+    assert_eq!(summary.overdue, 0);
+    assert_eq!(summary.due_soon, 0);
+    let unchanged: MigrationReport = migration_request(&f, &input, true, "unused")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        unchanged
+            .items
+            .iter()
+            .all(|item| item.action == MigrationAction::Unchanged)
+    );
+    f.store
+        .update(
+            &item.id,
+            item.revision,
+            UpdateItem {
+                name: Change(Some("Edited current item".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let replay: MigrationReport = migration_request(&f, &input, false, "migration-attempt")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replay, receipt);
+    let fresh: MigrationReport = migration_request(&f, &input, false, "migration-again")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        fresh
+            .items
+            .iter()
+            .all(|item| item.action == MigrationAction::Unchanged)
+    );
+    assert_eq!(
+        f.get("example-migrated").await.definition.name,
+        "Edited current item"
+    );
+    let mut changed = input.clone();
+    changed.items[0].item.definition.summary = "Changed migration content".into();
+    assert_eq!(
+        migration_request(&f, &changed, false, "migration-attempt")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let conflicting: MigrationReport = migration_request(&f, &changed, true, "unused")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!conflicting.applicable);
+    assert_eq!(conflicting.items[0].action, MigrationAction::Conflict);
+    assert_eq!(
+        migration_request(&f, &changed, false, "different-migration")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let mut colliding_history = migration_item("example-history-collision");
+    colliding_history.history = vec![active.history[0].clone()];
+    let colliding_history = Migration {
+        items: vec![colliding_history],
+    };
+    let conflict: MigrationReport = migration_request(&f, &colliding_history, true, "unused")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!conflict.applicable);
+    assert!(
+        conflict.items[0]
+            .conflicts
+            .iter()
+            .any(|reason| reason == "event id already exists")
+    );
+    assert!(
+        conflict.items[0]
+            .conflicts
+            .iter()
+            .any(|reason| reason == "event occurrence id already exists")
+    );
+    assert!(
+        conflict.items[0]
+            .conflicts
+            .iter()
+            .any(|reason| reason == "event source identity already exists")
+    );
+    assert_eq!(
+        migration_request(&f, &colliding_history, false, "collision-with-history")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    // A cold reopen retains mapping and immutable receipts after current item edits.
+    let database = f.directory.path().join("maintenance.sqlite3");
+    f.server.close().await.unwrap();
+    f.store.close().await.unwrap();
+    let reopened = Store::open(&database).await.unwrap();
+    let owner = Actor::System {
+        id: home_maintenance::models::SystemActor::Owner,
+        name: "Owner credential".into(),
+    };
+    assert_eq!(
+        reopened
+            .migrate(input.clone(), &owner, "migration-attempt")
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        reopened
+            .events(&item.id, None, 100)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    reopened.close().await.unwrap();
+}
+#[tokio::test]
+async fn migration_conflicts_are_batched_atomic_and_cannot_claim_a_live_occurrence() {
+    use home_maintenance::models::{ImportedCompletion, Migration, MigrationReport};
+    let f = Fixture::new().await;
+    let existing = f.create("example-existing").await;
+    let mut claimed = migration_item("example-claim");
+    claimed.history.push(ImportedCompletion {
+        occurrence_id: Some(existing.occurrence.id),
+        ..Default::default()
+    });
+    let attempt = Migration {
+        items: vec![migration_item("example-before-conflict"), claimed],
+    };
+    let preview: MigrationReport = migration_request(&f, &attempt, true, "unused")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!preview.applicable);
+    assert!(
+        preview.items[1]
+            .conflicts
+            .iter()
+            .any(|reason| reason.contains("event occurrence id already exists"))
+    );
+    assert_eq!(
+        migration_request(&f, &attempt, false, "claim-attempt")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert!(matches!(
+        f.store.get(&attempt.items[0].item.id).await,
+        Err(home_maintenance::error::Error::NotFound)
+    ));
+    assert_eq!(
+        complete(&f, &existing, "existing-still-completable")
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let mut duplicate = migration_item("example-duplicate");
+    let repeated = Uuid::from_u128(999);
+    duplicate.history = vec![
+        ImportedCompletion {
+            id: Some(repeated),
+            ..Default::default()
+        },
+        ImportedCompletion {
+            id: Some(repeated),
+            ..Default::default()
+        },
+    ];
+    let duplicate = Migration {
+        items: vec![duplicate],
+    };
+    let report: MigrationReport = migration_request(&f, &duplicate, true, "unused")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(!report.applicable);
+    assert_eq!(
+        migration_request(&f, &duplicate, false, "duplicate-event")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let first = Migration {
+        items: vec![migration_item("example-raced")],
+    };
+    assert!(
+        migration_request(&f, &first, true, "unused")
+            .await
+            .json::<MigrationReport>()
+            .await
+            .unwrap()
+            .applicable
+    );
+    f.create("example-raced").await;
+    assert_eq!(
+        migration_request(&f, &first, false, "stale-preview")
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let duplicated = Migration {
+        items: vec![
+            migration_item("example-source-collision"),
+            migration_item("example-source-collision"),
+        ],
+    };
+    assert!(
+        !migration_request(&f, &duplicated, true, "unused")
+            .await
+            .json::<MigrationReport>()
+            .await
+            .unwrap()
+            .applicable
+    );
+    f.finish().await;
+}
+#[tokio::test]
+async fn migration_requires_admin_and_validates_before_writing() {
+    use home_maintenance::models::Migration;
+    let f = Fixture::new().await;
+    let input = Migration {
+        items: vec![migration_item("example-auth")],
+    };
+    for path in ["migrations", "migrations/preview"] {
+        let response = f
+            .client
+            .post(format!("{}/v1/{path}", f.origin))
+            .bearer_auth(INTEGRATION)
+            .header("X-Maintenance-System-Actor", "ha:integration")
+            .header("Idempotency-Key", "forbidden-migration")
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        f.client
+            .post(format!("{}/v1/migrations", f.origin))
+            .bearer_auth(OWNER)
+            .json(&input)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    let invalid = Migration { items: vec![] };
+    assert_eq!(
+        migration_request(&f, &invalid, false, "invalid-migration")
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(f.store.list(false, None, 200).await.unwrap().items.len(), 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn simultaneous_migrations_cannot_overwrite_one_target_or_duplicate_history() {
+    use home_maintenance::models::{
+        ImportedCompletion, Migration, MigrationAction, MigrationReport,
+    };
+    let f = Fixture::new().await;
+    let mut original = migration_item("example-concurrent");
+    original.history.push(ImportedCompletion::default());
+    let input = Migration {
+        items: vec![original.clone()],
+    };
+    let (first, second) = tokio::join!(
+        migration_request(&f, &input, false, "concurrent-first"),
+        migration_request(&f, &input, false, "concurrent-second")
+    );
+    assert_eq!(first.status(), StatusCode::CREATED);
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let first: MigrationReport = first.json().await.unwrap();
+    let second: MigrationReport = second.json().await.unwrap();
+    assert_ne!(first.items[0].action, second.items[0].action);
+    assert!([first.items[0].action, second.items[0].action].contains(&MigrationAction::Created));
+    assert!([first.items[0].action, second.items[0].action].contains(&MigrationAction::Unchanged));
+    assert_eq!(
+        f.store
+            .events(&original.item.id, None, 100)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(f.store.list(false, None, 100).await.unwrap().items.len(), 1);
+    f.finish().await;
 }

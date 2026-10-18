@@ -375,7 +375,8 @@ main,
   background: var(--warning-soft);
   color: var(--warning);
 }
-.badge.archived {
+.badge.archived,
+.badge.undated {
   background: transparent;
   color: var(--muted);
   border: 1px solid var(--line);

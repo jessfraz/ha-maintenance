@@ -96,6 +96,20 @@ async def test_native_entities_follow_the_entire_inventory(
     [
         {"items": [item_record(), item_record()], "next_page": None},
         {"items": [{**item_record(), "revision": True}], "next_page": None},
+        {"items": [{**item_record(), "status": "unknown"}], "next_page": None},
+        {
+            "items": [
+                {
+                    **item_record(),
+                    "last_completion": {"completed_at": "2025-02-03T04:05:06"},
+                }
+            ],
+            "next_page": None,
+        },
+        {
+            "items": [{**item_record(), "occurrence": {"id": NEXT_OCCURRENCE_ID}}],
+            "next_page": None,
+        },
         {"items": [item_record(due="9999-12-31")], "next_page": None},
         {"items": [item_record()], "next_page": "repeated-cursor"},
         {"items": [], "next_page": False},
@@ -107,6 +121,9 @@ async def test_native_entities_follow_the_entire_inventory(
     ids=[
         "duplicate-id",
         "invalid-revision",
+        "invalid-status",
+        "naive-completion-time",
+        "missing-nullable-due",
         "unrepresentable-calendar-end",
         "cursor-loop",
         "invalid-cursor",
