@@ -1266,7 +1266,7 @@ wheels = [
 
 [[package]]
 name = "home-maintenance-home-assistant"
-version = "0.10.2"
+version = "0.10.3"
 source = { virtual = "." }
 
 [package.dev-dependencies]

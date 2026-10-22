@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.3
+
+- Reject distrusted emSign certificate paths with refreshed trust roots and
+  certificate verification.
+
 ## 0.10.2
 
 - Keep task actions, editor buttons, and form fields at least 44 pixels tall, including small remove and reorder controls.
