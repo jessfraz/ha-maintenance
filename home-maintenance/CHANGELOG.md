@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.4
+
+- Add the existing maintenance icon beside the app name, matching FileVault's
+  header sizing, spacing and alignment in both themes. Preserve task cards
+  and the rest of the dashboard styling.
+
 ## 0.10.3
 
 - Reject distrusted emSign certificate paths with refreshed trust roots and

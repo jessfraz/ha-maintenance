@@ -202,10 +202,19 @@ main,
   border-bottom: 1px solid var(--line);
 }
 .wordmark {
+  --brand-ink: #1d1e20;
+  --brand-soft: #f0f0ee;
+  --brand-paper: #ffffff;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   font-size: 17px;
   letter-spacing: -0.2px;
   text-decoration: none;
   font-weight: 600;
+}
+.wordmark svg {
+  flex-shrink: 0;
 }
 .eyebrow,
 .item-place {
@@ -859,6 +868,11 @@ dialog .dialog-heading h2 {
   text-underline-offset: 3px;
 }
 @media (prefers-color-scheme: dark) {
+  .wordmark {
+    --brand-ink: #f0f0ee;
+    --brand-soft: #292a2c;
+    --brand-paper: #1d1e20;
+  }
   :root {
     color: #e6e6e4;
     background: #131415;

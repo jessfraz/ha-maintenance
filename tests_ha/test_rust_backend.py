@@ -3,7 +3,7 @@
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -159,11 +159,13 @@ async def test_native_app_touch_targets(
 async def rust_backend(
     hass: HomeAssistant,
     tmp_path: Path,
-    unused_tcp_port: int,
+    unused_tcp_port_factory: Callable[[], int],
     request: pytest.FixtureRequest,
     socket_enabled: None,
 ) -> AsyncIterator[RustBackend]:
     """Launch the actual binary against disposable SQLite and private options."""
+    # Allocate the port after socket_enabled has enabled this local fixture.
+    unused_tcp_port = unused_tcp_port_factory()
     binary = Path(
         os.environ.get("MAINTENANCE_TEST_BINARY", "target/debug/home-maintenance")
     )
