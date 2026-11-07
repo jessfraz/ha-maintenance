@@ -117,7 +117,42 @@ async def test_native_assist_api_discovers_maintenance_tools(
 ) -> None:
     assert {
         tool.name for tool in assist_api.tools if tool.integration == "home_maintenance"
-    } == {"home_maintenance__query", "home_maintenance__complete"}
+    } == {
+        "home_maintenance__query",
+        "home_maintenance__complete",
+        "home_maintenance__health",
+    }
+
+
+async def test_exposed_count_allows_queries_without_task_controls(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    hass_user: MockUser,
+) -> None:
+    """A read-only sensor opt-in must not expose native to-do mutations."""
+    async_expose_entity(hass, "conversation", "todo.maintenance", False)
+    async_expose_entity(hass, "conversation", "sensor.maintenance_active", True)
+    caller = await api(hass, Context(user_id=hass_user.id))
+    names = {tool.name for tool in caller.tools}
+    assert QUERY in names
+    assert COMPLETE not in names
+    assert not any(name.startswith("todo__") for name in names)
+    assert len(items(await call(caller))) == 1
+
+
+async def test_read_only_exposure_revokes_cached_completion(
+    hass: HomeAssistant,
+    assist_api: llm.APIInstance,
+    backend: Backend,
+) -> None:
+    """Previously discovered write tools cannot use the query-only opt-in."""
+    async_expose_entity(hass, "conversation", "todo.maintenance", False)
+    async_expose_entity(hass, "conversation", "sensor.maintenance_active", True)
+    before = list(backend.requests)
+    result = await call(assist_api, COMPLETE, COMPLETE_ARGUMENTS)
+    assert result.error and result.data["error"] == "not_exposed"
+    assert backend.requests == before
+    assert len(items(await call(assist_api))) == 1
 
 
 async def test_tool_parameters_serialize_with_the_native_provider_converter(
@@ -138,7 +173,7 @@ async def test_tool_parameters_serialize_with_the_native_provider_converter(
         if tool.name == QUERY:
             assert properties["limit"]["type"] == "integer"
             assert properties["limit"]["maximum"] == 20
-        else:
+        elif tool.name == COMPLETE:
             assert set(schema["required"]) == {"item_id", "occurrence_id", "revision"}
             assert properties["revision"]["type"] == "integer"
 

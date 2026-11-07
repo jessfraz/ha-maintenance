@@ -82,8 +82,8 @@ async def test_native_diagnostics_download_and_discovery(
             },
         },
         "entities": {
-            "registered": 6,
-            "available": 6,
+            "registered": 7,
+            "available": 7,
             "unavailable": 0,
             "unknown": 0,
             "not_loaded": 0,
@@ -290,8 +290,8 @@ async def test_entity_health_is_aggregate_and_scoped_to_the_entry(
     before = len(backend.requests)
     result = await download(hass_client, entry)
     assert result["entities"] == {
-        "registered": 6,
-        "available": 3,
+        "registered": 7,
+        "available": 4,
         "unavailable": 1,
         "unknown": 1,
         "not_loaded": 1,
@@ -363,8 +363,8 @@ async def test_failed_refresh_does_not_report_old_counts_as_current(
     assert result["summary"] is None
     assert result["inventory"] is None
     assert result["entities"] == {
-        "registered": 6,
-        "available": 0,
+        "registered": 7,
+        "available": 1,
         "unavailable": 6,
         "unknown": 0,
         "not_loaded": 0,
