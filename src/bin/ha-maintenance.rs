@@ -23,6 +23,9 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INPUT_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Parser)]
 #[command(
     name = "ha-maintenance",
@@ -87,10 +90,13 @@ impl SystemActor {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Unauthenticated readiness check.
+    /// Probe service and database readiness. Native access needs no credential.
     Health,
+    /// Read current task counts.
     Summary,
+    /// Read the service version, schema and credential role.
     System,
+    /// Read the Home Assistant device/entity catalog (administrator only).
     Registry,
     Installation,
     InstallationCheck,
@@ -110,10 +116,15 @@ enum Command {
 impl Command {
     fn supports_home_assistant(&self) -> bool {
         // custom_components/home_maintenance/http.py exposes only this surface.
-        // Health, imports, migrations and adapter reports stay native-only.
+        // Imports, migrations and adapter reports stay native-only.
         matches!(
             self,
-            Self::Summary | Self::System | Self::Registry | Self::Items(_) | Self::Reorders(_)
+            Self::Health
+                | Self::Summary
+                | Self::System
+                | Self::Registry
+                | Self::Items(_)
+                | Self::Reorders(_)
         )
     }
 }
@@ -126,15 +137,22 @@ struct Input {
 }
 impl Input {
     fn read<T: DeserializeOwned>(&self) -> Result<T, Failure> {
-        let bytes = if self.input.as_os_str() == "-" {
-            let mut bytes = Vec::new();
+        let mut bytes = Vec::new();
+        if self.input.as_os_str() == "-" {
             std::io::stdin()
+                .take(MAX_INPUT_BYTES + 1)
                 .read_to_end(&mut bytes)
                 .map_err(|_| Failure::local("input_read_failed"))?;
-            bytes
         } else {
-            std::fs::read(&self.input).map_err(|_| Failure::local("input_read_failed"))?
-        };
+            std::fs::File::open(&self.input)
+                .map_err(|_| Failure::local("input_read_failed"))?
+                .take(MAX_INPUT_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| Failure::local("input_read_failed"))?;
+        }
+        if !u64::try_from(bytes.len()).is_ok_and(|length| length <= MAX_INPUT_BYTES) {
+            return Err(Failure::local("input_too_large"));
+        }
         // Parse errors can quote private input. Never forward them to stderr.
         serde_json::from_slice(&bytes).map_err(|_| Failure::local("invalid_json_input"))
     }
@@ -383,7 +401,9 @@ impl Api {
         {
             return Err(Failure::local("invalid_url"));
         }
-        let authorization = if matches!(cli.command, Command::Health) {
+        let native_health =
+            cli.transport == Transport::Native && matches!(cli.command, Command::Health);
+        let authorization = if native_health {
             None
         } else {
             let token = if let Some(path) = &cli.token_file {
@@ -423,6 +443,9 @@ impl Api {
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, Failure> {
         let path = match self.transport {
             Transport::Native => path.to_owned(),
+            Transport::HomeAssistant if path == "/health" => {
+                "/api/home_maintenance/v1/health".to_owned()
+            }
             Transport::HomeAssistant => format!("/api/home_maintenance{path}"),
         };
         let url = self
@@ -453,11 +476,27 @@ fn body<T: DeserializeOwned + Serialize>(
 }
 
 async fn send<T: DeserializeOwned + Serialize>(request: RequestBuilder) -> Result<(), Failure> {
-    let response = request
+    let mut response = request
         .send()
         .await
         .map_err(|_| Failure::local("request_failed"))?;
     let status = response.status().as_u16();
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| Failure::http(status, "response_read_failed"))?
+    {
+        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+            return Err(Failure::http(status, "response_too_large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     if !response.status().is_success() {
         // Only known server codes may cross this boundary. Messages, request IDs,
         // redirects and arbitrary error_code strings can contain private data.
@@ -465,9 +504,7 @@ async fn send<T: DeserializeOwned + Serialize>(request: RequestBuilder) -> Resul
         struct ApiError {
             error_code: Option<String>,
         }
-        let code = response
-            .json::<ApiError>()
-            .await
+        let code = serde_json::from_slice::<ApiError>(&bytes)
             .ok()
             .and_then(|e| e.error_code);
         let error_code = match code.as_deref() {
@@ -482,18 +519,11 @@ async fn send<T: DeserializeOwned + Serialize>(request: RequestBuilder) -> Resul
         };
         return Err(Failure::http(status, error_code));
     }
-    let etag = response
-        .headers()
-        .get("etag")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
     let result = if status == 204 {
         None
     } else {
         Some(
-            response
-                .json::<T>()
-                .await
+            serde_json::from_slice::<T>(&bytes)
                 .map_err(|_| Failure::http(status, "invalid_json_response"))?,
         )
     };

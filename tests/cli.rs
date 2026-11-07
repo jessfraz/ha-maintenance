@@ -568,7 +568,13 @@ impl HttpFixture {
                         body,
                     })
                     .unwrap();
-                reader.get_mut().write_all(response.as_bytes()).unwrap();
+                // A bounded client can stop reading before the whole response arrives.
+                if let Err(error) = reader.get_mut().write_all(response.as_bytes()) {
+                    assert!(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                    ));
+                }
             }
         });
         Self {
@@ -665,6 +671,36 @@ fn binary_sends_exact_auth_revisions_keys_body_and_one_opaque_cursor_page() {
     let body: home_maintenance::models::CompleteItem =
         serde_json::from_slice(&request.body).unwrap();
     assert_eq!(body.occurrence_id, uuid::Uuid::from_u128(1));
+}
+
+#[test]
+fn oversized_input_is_rejected_before_any_request() {
+    let fixture = HttpFixture::new(200, "", "null");
+    failure(
+        binary(
+            &fixture.url,
+            &["items", "create", "--idempotency-key", "example-key"],
+            &"x".repeat(8_388_609),
+            Some(TOKEN),
+        ),
+        None,
+        "input_too_large",
+    );
+    fixture.no_requests();
+}
+
+#[test]
+fn binary_bounds_success_and_error_response_bodies_without_printing_them() {
+    let body = "example-private-body".repeat(450_000);
+    for status in [200, 503] {
+        let fixture = HttpFixture::new(status, "", &body);
+        failure(
+            binary(&fixture.url, &["summary"], "", Some(TOKEN)),
+            Some(status),
+            "response_too_large",
+        );
+        fixture.only_request();
+    }
 }
 
 #[test]
@@ -875,6 +911,30 @@ fn binary_deadline_and_connection_failures_are_bounded_and_do_not_retry() {
 }
 
 #[test]
+fn home_assistant_health_uses_the_authenticated_readiness_bridge() {
+    let fixture = HttpFixture::new(200, "", r#""ok""#);
+    let report = success::<String>(
+        configured_binary(
+            Some(&fixture.url),
+            &["--transport", "home-assistant", "health"],
+            "",
+            None,
+            &[("HOME_ASSISTANT_TOKEN", "example-home-assistant-token")],
+        ),
+        200,
+    );
+    assert_eq!(report.body, "ok");
+    let request = fixture.only_request();
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.target, "/api/home_maintenance/v1/health");
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer example-home-assistant-token")
+    );
+    assert!(request.header("x-maintenance-system-actor").is_none());
+}
+
+#[test]
 fn home_assistant_transport_selects_its_own_origin_and_credential_without_fallback() {
     let ignored = HttpFixture::new(500, "", "null");
     let ha = HttpFixture::new(200, "", r#"{"items":[],"next_page":"example-ha-cursor"}"#);
@@ -1028,7 +1088,6 @@ fn home_assistant_mutations_preserve_headers_and_native_only_commands_make_zero_
 
     let unused = HttpFixture::new(500, "", "null");
     for command in [
-        vec!["health"],
         vec!["import"],
         vec!["installation"],
         vec!["installation-check"],

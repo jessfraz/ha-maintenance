@@ -18,7 +18,7 @@ _CHECKLIST_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/checklist/{_UUID}")
 _REORDER_ROUTE = re.compile(rf"items/{ITEM_ID.pattern}/reorders")
 _ROUTES = (
     (re.compile(r"items"), frozenset({"GET", "POST"})),
-    (re.compile(r"summary|system"), frozenset({"GET"})),
+    (re.compile(r"summary|system|health"), frozenset({"GET"})),
     (re.compile(r"home-assistant/registry"), frozenset({"GET"})),
     (re.compile(rf"items/{ITEM_ID.pattern}"), frozenset({"GET", "PATCH", "DELETE"})),
     (re.compile(rf"items/{ITEM_ID.pattern}/events"), frozenset({"GET"})),
@@ -105,9 +105,10 @@ class MaintenanceView(HomeAssistantView):
             if key in request.headers
         }
         try:
+            backend_path = "/health" if path == "health" else f"/v1/{path}"
             response = await coordinator.client.request(
                 request.method,
-                f"/v1/{path}"
+                backend_path
                 + (
                     f"?{urlencode(list(request.query.items()))}"
                     if request.query

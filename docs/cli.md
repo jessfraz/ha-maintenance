@@ -43,18 +43,28 @@ ha-maintenance items get example-filter
 ha-maintenance --transport home-assistant items list --limit 50
 ```
 
-Native `health` needs an origin but no credential. `--timeout` sets a total HTTP
+Use the configured credential helper for Home Assistant access:
+
+```sh
+fetch-home-assistant -- ha-maintenance --transport home-assistant health
+fetch-home-assistant -- ha-maintenance --transport home-assistant system
+```
+
+`health` probes backend and database readiness. Home Assistant access requires
+its normal authentication and a loaded Maintenance connection. Native access
+needs an origin but no credential. The integration's connection-health entity
+reports observation age separately. `--timeout` sets a total HTTP
 deadline of 1–300 seconds, default 30. Native dedicated integration credentials
 can explicitly select `--system-actor ha:integration` or `ha:automation`; the
 service still checks the credential's authority. The HA bridge derives actor
 and authority from the authenticated HA user, so `--system-actor` is rejected
 for that transport. The CLI never supplies fake ingress or HA user headers.
 
-The HA bridge supports item and reorder operations plus `summary`, `system`,
-and `registry`. Health, imports, migrations, installation checks/status, and
+The HA bridge supports item and reorder operations plus `health`, `summary`,
+`system`, and `registry`. Imports, migrations, installation checks/status, and
 integration reports are native-only. Selecting any native-only command with
 HA transport fails locally with `unsupported_transport_operation` and zero
-requests; it never silently switches transports. The bridge is not extended.
+requests; it never silently switches transports.
 
 ## JSON and concurrency
 
@@ -69,6 +79,9 @@ Commands with a JSON body accept `--input /path/to/request.json`, or stdin with
 request. Unknown fields and malformed types are rejected as those types
 specify. The server remains responsible for domain validation and authority.
 Patch bodies preserve omitted fields versus explicit nulls.
+Input and response bodies are limited to 8 MiB. The server's lower per-route
+limits still apply. Oversized input fails before a request; oversized responses
+fail with `response_too_large` and never print their contents.
 
 ```sh
 # Fictional request; replace the revision/key with the caller's captured values.
