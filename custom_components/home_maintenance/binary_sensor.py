@@ -34,6 +34,7 @@ class MaintenanceConnectionProblem(
     _attr_translation_key = "connection_problem"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _unrecorded_attributes = frozenset({"last_success_at", "observation_age_seconds"})
 
     def __init__(self, entry: MaintenanceConfigEntry) -> None:
         super().__init__(entry.runtime_data)
