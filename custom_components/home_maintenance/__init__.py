@@ -21,7 +21,12 @@ from .coordinator import MaintenanceCoordinator
 from .http import MaintenanceView
 from .services import async_register_services
 
-PLATFORMS = [Platform.CALENDAR, Platform.SENSOR, Platform.TODO]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.CALENDAR,
+    Platform.SENSOR,
+    Platform.TODO,
+]
 type MaintenanceConfigEntry = ConfigEntry[MaintenanceCoordinator]
 
 

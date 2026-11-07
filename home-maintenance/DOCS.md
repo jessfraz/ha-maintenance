@@ -194,7 +194,9 @@ the calendar unavailable instead of returning stale events as current data.
 
 ## Assist
 
-Expose the Maintenance to-do entity in **Settings → Voice assistants → Expose**.
+Expose the Maintenance Active sensor in **Settings → Voice assistants → Expose**
+for read-only queries and connection health. Expose the Maintenance to-do entity
+only when task completion and Home Assistant’s native to-do controls are wanted.
 In your LLM conversation agent's settings, enable **Device control** (the Assist
 API). Maintenance contributes its tools automatically through Home Assistant's
 `llm.py` platform.
@@ -208,7 +210,9 @@ The tools are:
 
 - `home_maintenance__query`: active, upcoming, overdue, or next work; today,
   tomorrow, this week, or next week; optional name filter and a result limit.
-- `home_maintenance__complete`: completes an exact item ID, occurrence ID, and
+- `home_maintenance__health`: cached connection health and observation age.
+- `home_maintenance__complete`: when the task list is exposed, completes an exact
+  item ID, occurrence ID, and
   revision returned by a query.
 
 Queries refresh the app before answering. Results include names, summaries,
@@ -273,7 +277,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.10.4
+  ghcr.io/jessfraz/ha-maintenance:0.10.5
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its

@@ -66,6 +66,11 @@
       "completed": {
         "name": "Completed"
       }
+    },
+    "binary_sensor": {
+      "connection_problem": {
+        "name": "Connection problem"
+      }
     }
   }
 }

@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal, NotRequired, TypedDict
 from urllib.parse import urlencode
 from uuid import UUID
@@ -20,6 +20,7 @@ from homeassistant.helpers import instance_id
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .client import Actor, MaintenanceClient, ResponseTooLarge
 from .const import CONF_ADDON_SLUG, DOMAIN, SUMMARY_KEYS
@@ -66,6 +67,7 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             always_update=False,
         )
         self.client = client
+        self.last_success_at: datetime | None = None
         self.instructions_task: asyncio.Task[None] | None = None
         self._entry = entry
         self._version = version
@@ -146,6 +148,7 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             raise UpdateFailed("Cannot read the backend task inventory") from err
         await self._async_report_presence()
         await self.async_report_registry()
+        self.last_success_at = dt_util.utcnow()
         return MaintenanceData(summary, items)
 
     async def async_report_registry(self) -> None:

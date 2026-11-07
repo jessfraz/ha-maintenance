@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.5
+
+- Report connection failures and expired snapshots separately from due work.
+- Allow read-only Assist queries by exposing the Active sensor.
+- Align the app header and source footer with the other apps.
+
 ## 0.10.4
 
 - Add the existing maintenance icon beside the app name, matching FileVault's
