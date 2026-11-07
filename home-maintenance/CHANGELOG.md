@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.6
+
+- Publish the native Maintenance CLI with typed JSON and explicit Home Assistant
+  transport, preserving revision and idempotency requirements for existing actions.
+- Allow authenticated, read-only readiness probes through Home Assistant, and
+  bound CLI request and response bodies without exposing private error contents.
+
 ## 0.10.5
 
 - Report connection failures and expired snapshots separately from due work.

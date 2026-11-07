@@ -78,6 +78,7 @@ The service exposes a bearer-authenticated JSON API for tasks, checklists,
 completion history, imports, and reorder requests. Migration endpoints provide
 a dry run and preserve source IDs, known completion timestamps, and history.
 
+- [Native Rust CLI](docs/cli.md) (`ha-maintenance`, also packaged by Nix)
 - [API reference](docs/api.md)
 - [OpenAPI schema](openapi/api.json)
 - [Example catalog](config/items.example.json) and [migration](config/migration.example.json)

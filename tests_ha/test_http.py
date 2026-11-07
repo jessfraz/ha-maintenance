@@ -19,6 +19,33 @@ PREFIX = "/api/home_maintenance/v1"
 REORDER_ID = "0193c69f-e5c4-7e93-b6cb-8172dacb6182"
 
 
+async def test_readiness_is_authenticated_read_only_and_probes_the_backend(
+    hass_client: ClientSessionGenerator,
+    hass_user_token: str,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+) -> None:
+    backend.responses[("GET", "/health")] = (
+        200,
+        b'"ok"',
+        {"Content-Type": "application/json"},
+    )
+    anonymous = await hass_client(None)
+    before = len(backend.requests)
+    assert (await anonymous.get(f"{PREFIX}/health")).status == 401
+    assert len(backend.requests) == before
+    client = await hass_client(hass_user_token)
+    response = await client.get(f"{PREFIX}/health")
+    assert response.status == 200
+    assert await response.json() == "ok"
+    assert backend.requests[-1].path == "/health"
+    before = len(backend.requests)
+    assert (await client.post(f"{PREFIX}/health")).status == 405
+    assert len(backend.requests) == before
+    backend.responses[("GET", "/health")] = (503, b'"unavailable"', {})
+    assert (await client.get(f"{PREFIX}/health")).status == 503
+
+
 async def test_authentication_and_human_attribution(
     hass_client: ClientSessionGenerator,
     hass_user_token: str,
