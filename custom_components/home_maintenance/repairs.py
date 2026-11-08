@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -55,7 +56,7 @@ class MaintenanceRepairs:
 
     @callback
     def async_connection_failed(self) -> None:
-        """Publish initial setup and credential failures without backend details."""
+        """Publish initial setup and transport failures without backend details."""
         if self.coordinator._shutdown_requested:
             return
         ir.async_create_issue(
@@ -71,9 +72,20 @@ class MaintenanceRepairs:
         )
 
     @callback
+    def async_auth_failed(self) -> None:
+        """Core already owns the credential Repair for this availability gap."""
+        if not self.coordinator._shutdown_requested:
+            ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)
+
+    @callback
     def async_reconcile(self) -> None:
         # Shutdown unsubscribes future polls without cancelling an in-flight read.
         if self.coordinator._shutdown_requested:
+            return
+        if not self.coordinator.last_update_success and isinstance(
+            self.coordinator.last_exception, ConfigEntryAuthFailed
+        ):
+            self.async_auth_failed()
             return
         if health_snapshot(self.coordinator)["available"]:
             ir.async_delete_issue(self.hass, DOMAIN, self._issue_id)

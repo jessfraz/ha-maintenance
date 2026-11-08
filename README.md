@@ -112,3 +112,4 @@ Examples are fictional; keep credentials and personal catalogs out of the checko
 Home Assistant reports app availability failures in Settings → Repairs, with a
 read-only link to the app logs. A fresh successful observation clears the Repair;
 a missing or stale response cannot clear an existing failure.
+Rejected credentials use Home Assistant’s native reauthentication Repair.

@@ -146,7 +146,10 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             items = await self._async_items()
             if self._instance_id is None:
                 self._instance_id = await instance_id.async_get(self.hass)
-        except ConfigEntryAuthFailed, UpdateFailed:
+        except ConfigEntryAuthFailed:
+            self.repairs.async_auth_failed()
+            raise
+        except UpdateFailed:
             self.repairs.async_connection_failed()
             raise
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:

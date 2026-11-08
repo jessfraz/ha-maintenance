@@ -21,6 +21,20 @@ def issue(hass: HomeAssistant, entry: MaintenanceConfigEntry) -> ir.IssueEntry |
     return ir.async_get(hass).async_get_issue(DOMAIN, f"{entry.entry_id}_backend")
 
 
+def core_auth_key(entry: MaintenanceConfigEntry) -> tuple[str, str]:
+    return ("homeassistant", f"config_entry_reauth_home_maintenance_{entry.entry_id}")
+
+
+def owned_issues(
+    hass: HomeAssistant, entry: MaintenanceConfigEntry
+) -> set[tuple[str, str]]:
+    return {
+        (item.domain, item.issue_id)
+        for item in ir.async_get(hass).issues.values()
+        if item.config_entry_id == entry.entry_id
+    }
+
+
 async def test_native_repair_failure_and_confirmed_recovery(
     hass: HomeAssistant, entry: MaintenanceConfigEntry, backend: Backend
 ) -> None:
@@ -60,11 +74,15 @@ async def test_initial_failure_owns_repair_and_entry_removal_clears(
     )
     entry.add_to_hass(hass)
     assert not await hass.config_entries.async_setup(entry.entry_id)
-    failed = issue(hass, entry)
-    assert failed is not None and failed.config_entry_id == entry.entry_id
-    assert failed.learn_more_url == "homeassistant://config/app/test_app/logs"
+    await hass.async_block_till_done()
+    if status == 401:
+        assert owned_issues(hass, entry) == {core_auth_key(entry)}
+    else:
+        failed = issue(hass, entry)
+        assert failed is not None and failed.config_entry_id == entry.entry_id
+        assert failed.learn_more_url == "homeassistant://config/app/test_app/logs"
     await hass.config_entries.async_remove(entry.entry_id)
-    assert issue(hass, entry) is None
+    assert not owned_issues(hass, entry)
 
 
 async def test_stale_observation_and_unload_cleanup(
@@ -114,3 +132,24 @@ async def test_late_failed_http_response_cannot_publish_after_unload(
         await refresh
     assert issue(hass, entry) is None
     assert isinstance(coordinator.last_exception, UpdateFailed)
+
+
+async def test_credential_failure_replaces_only_generic_availability(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    backend.responses[("GET", "/v1/summary")] = (503, b"private detail", {})
+    await entry.runtime_data.async_refresh()
+    assert issue(hass, entry) is not None
+    backend.responses[("GET", "/v1/summary")] = (401, b"private detail", {})
+    await entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert owned_issues(hass, entry) == {core_auth_key(entry)}
+    freezer.tick(timedelta(seconds=240))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done()
+    assert owned_issues(hass, entry) == {core_auth_key(entry)}
+    overdue = hass.states.get("sensor.maintenance_overdue")
+    assert overdue is not None and overdue.state == "unavailable"
