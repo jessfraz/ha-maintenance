@@ -17,7 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.setup import async_setup_component
 from homeassistant.util.json import JsonObjectType
 from pytest_aiohttp.plugin import AiohttpServer
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
@@ -169,6 +169,8 @@ class Backend:
     )
     role: str = "integration"
     delay_seconds: float = 0
+    blocked_path: str | None = None
+    response_release: asyncio.Event = field(default_factory=asyncio.Event)
     request_received: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def handle(self, request: web.Request) -> web.Response:
@@ -182,6 +184,8 @@ class Backend:
             )
         )
         self.request_received.set()
+        if request.path == self.blocked_path:
+            await self.response_release.wait()
         if self.delay_seconds:
             await asyncio.sleep(self.delay_seconds)
         if response := self.responses.get((request.method, request.path)):

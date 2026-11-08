@@ -72,5 +72,11 @@
         "name": "Connection problem"
       }
     }
+  },
+  "issues": {
+    "backend_unavailable": {
+      "title": "Maintenance is unavailable",
+      "description": "The app could not provide a fresh, complete task inventory. Check its logs, connection and integration credentials. This Repair clears after a successful response; overdue tasks are reported separately."
+    }
   }
 }

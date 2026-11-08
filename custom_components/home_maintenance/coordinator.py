@@ -26,6 +26,7 @@ from .client import Actor, MaintenanceClient, ResponseTooLarge
 from .const import CONF_ADDON_SLUG, DOMAIN, SUMMARY_KEYS
 from .models import MaintenanceData, MaintenanceItem
 from .registry import describe_references, registry_payload, unavailable_payload
+from .repairs import MaintenanceRepairs
 
 _LOGGER = logging.getLogger(__name__)
 _BACKUP_TIMEOUT_SECONDS = 10
@@ -68,6 +69,7 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
         )
         self.client = client
         self.last_success_at: datetime | None = None
+        self.repairs = MaintenanceRepairs(hass, entry, self)
         self.instructions_task: asyncio.Task[None] | None = None
         self._entry = entry
         self._version = version
@@ -144,7 +146,14 @@ class MaintenanceCoordinator(DataUpdateCoordinator[MaintenanceData]):
             items = await self._async_items()
             if self._instance_id is None:
                 self._instance_id = await instance_id.async_get(self.hass)
+        except ConfigEntryAuthFailed:
+            self.repairs.async_auth_failed()
+            raise
+        except UpdateFailed:
+            self.repairs.async_connection_failed()
+            raise
         except (ClientError, TimeoutError, ResponseTooLarge, ValueError) as err:
+            self.repairs.async_connection_failed()
             raise UpdateFailed("Cannot read the backend task inventory") from err
         await self._async_report_presence()
         await self.async_report_registry()

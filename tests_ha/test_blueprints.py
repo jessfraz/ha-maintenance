@@ -13,7 +13,7 @@ from homeassistant.components.automation.helpers import async_get_blueprints
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from pytest_homeassistant.common import async_fire_time_changed
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 

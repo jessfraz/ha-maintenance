@@ -21,8 +21,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from homeassistant.util.json import JsonObjectType
 from playwright.async_api import async_playwright, expect
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from pytest_homeassistant.common import MockConfigEntry, MockUser
+from pytest_homeassistant.typing import ClientSessionGenerator
 
 from custom_components.home_maintenance.const import (
     CONF_ADDON_SLUG,
