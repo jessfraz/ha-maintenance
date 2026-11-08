@@ -13,8 +13,8 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.setup import async_setup_component
 from homeassistant.util.json import JsonObjectType
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.typing import (
+from pytest_homeassistant.common import MockConfigEntry
+from pytest_homeassistant.typing import (
     ClientSessionGenerator,
     WebSocketGenerator,
 )

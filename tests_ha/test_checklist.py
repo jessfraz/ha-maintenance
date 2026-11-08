@@ -7,8 +7,8 @@ import probatio as vol
 import pytest
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from pytest_homeassistant_custom_component.common import MockUser
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from pytest_homeassistant.common import MockUser
+from pytest_homeassistant.typing import ClientSessionGenerator
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import DOMAIN

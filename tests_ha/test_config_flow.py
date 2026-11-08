@@ -17,7 +17,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 from pytest_aiohttp.plugin import AiohttpServer
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant.common import MockConfigEntry
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (

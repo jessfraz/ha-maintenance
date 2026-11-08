@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.7
+
+- Report functional failures and stale status in native Home Assistant Repairs.
+- Validate the adapter with the official Home Assistant 2026.11 fixtures.
+
 ## 0.10.6
 
 - Publish the native Maintenance CLI with typed JSON and explicit Home Assistant

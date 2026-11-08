@@ -8,8 +8,8 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
-from pytest_homeassistant_custom_component.typing import (
+from pytest_homeassistant.common import async_fire_time_changed
+from pytest_homeassistant.typing import (
     ClientSessionGenerator,
     WebSocketGenerator,
 )

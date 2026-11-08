@@ -1,9 +1,12 @@
 """Connection health is separate from the task catalog and overdue counts."""
 
+from typing import TYPE_CHECKING
+
 from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonObjectType
 
-from .coordinator import MaintenanceCoordinator
+if TYPE_CHECKING:
+    from .coordinator import MaintenanceCoordinator
 
 FRESH_SECONDS = 180
 

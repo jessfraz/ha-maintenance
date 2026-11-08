@@ -8,8 +8,8 @@ from freezegun.api import FrozenDateTimeFactory
 from homeassistant.components import frontend
 from homeassistant.core import HomeAssistant
 from homeassistant.loader import async_get_integration
-from pytest_homeassistant_custom_component.common import MockUser
-from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
+from pytest_homeassistant.common import MockUser
+from pytest_homeassistant.typing import ClientSessionGenerator
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import CONF_ADDON_SLUG, DOMAIN

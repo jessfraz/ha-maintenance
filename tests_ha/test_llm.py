@@ -13,7 +13,7 @@ from homeassistant.helpers import llm
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.setup import async_setup_component
 from homeassistant.util.json import JsonObjectType
-from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
+from pytest_homeassistant.common import MockConfigEntry, MockUser
 
 from custom_components.home_maintenance import MaintenanceConfigEntry
 from custom_components.home_maintenance.const import (
