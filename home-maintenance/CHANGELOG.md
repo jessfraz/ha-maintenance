@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.9
+
+- Fix select spacing and let Dependabot track App Kit releases.
+
 ## 0.10.8
 
 - Share the app shell, controls, notices, and themes with HA App Kit.

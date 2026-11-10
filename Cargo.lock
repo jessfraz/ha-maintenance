@@ -922,8 +922,8 @@ dependencies = [
 
 [[package]]
 name = "ha-app-ui"
-version = "0.1.1"
-source = "git+https://github.com/jessfraz/ha-app-kit?rev=a7b09c84ee35bf7c372dfcdc8614a0d48399af1c#a7b09c84ee35bf7c372dfcdc8614a0d48399af1c"
+version = "0.1.2"
+source = "git+https://github.com/jessfraz/ha-app-kit?tag=v0.1.2#24e7f640a5ae65c5eda301cdfee0a8110e601121"
 
 [[package]]
 name = "hashbrown"
@@ -989,7 +989,7 @@ dependencies = [
 
 [[package]]
 name = "home-maintenance"
-version = "0.10.8"
+version = "0.10.9"
 dependencies = [
  "anyhow",
  "chrono",

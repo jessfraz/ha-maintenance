@@ -1,6 +1,6 @@
 [package]
 name = "home-maintenance"
-version = "0.10.8"
+version = "0.10.9"
 edition = "2024"
 license = "MIT"
 description = "Local maintenance schedules and history for Home Assistant"
@@ -8,7 +8,7 @@ repository = "https://github.com/jessfraz/ha-maintenance"
 default-run = "home-maintenance"
 
 [dependencies]
-ha-app-ui = { git = "https://github.com/jessfraz/ha-app-kit", rev = "a7b09c84ee35bf7c372dfcdc8614a0d48399af1c" }
+ha-app-ui = { git = "https://github.com/jessfraz/ha-app-kit", tag = "v0.1.2" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
