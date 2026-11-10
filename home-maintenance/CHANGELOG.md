@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.8
+
+- Share the app shell, controls, notices, and themes with HA App Kit.
+- Recover private state after native restores without following external links
+  or changing nested mounts.
+- Update the bundled SQLite dependency for its current security advisory.
+
 ## 0.10.7
 
 - Report functional failures and stale status in native Home Assistant Repairs.

@@ -1565,13 +1565,49 @@
   "info": {
     "description": "Local one-off, standing and recurring maintenance tasks, owner-managed standing instructions, source-preserving migrations, completion history and durable reorder requests. Recurring tasks require a due date; instructions cannot be completed. Bearer authentication. Creates, completions, reorders and checklist changes require Idempotency-Key; item mutations require the quoted If-Match revision.",
     "title": "Maintenance API",
-    "version": "0.10.7"
+    "version": "0.10.8"
   },
   "openapi": "3.0.3",
   "paths": {
     "/": {
       "get": {
         "operationId": "index",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app-kit.css": {
+      "get": {
+        "operationId": "kit_style",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
+        ]
+      }
+    },
+    "/app-kit.js": {
+      "get": {
+        "operationId": "kit_script",
         "responses": {
           "default": {
             "content": {
@@ -1676,6 +1712,24 @@
         },
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/shell.js": {
+      "get": {
+        "operationId": "shell_script",
+        "responses": {
+          "default": {
+            "content": {
+              "*/*": {
+                "schema": {}
+              }
+            },
+            "description": ""
+          }
+        },
+        "tags": [
+          "web"
         ]
       }
     },

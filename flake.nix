@@ -34,11 +34,23 @@
         src = pkgs.lib.fileset.toSource {
           root = ./.;
           fileset = pkgs.lib.fileset.unions [
-            ./Cargo.toml ./Cargo.lock ./src ./migrations ./web ./assets
-            ./config ./tests
+            ./Cargo.toml
+            ./Cargo.lock
+            ./src
+            ./migrations
+            ./web
+            ./assets
+            ./config
+            ./tests
           ];
         };
-        cargoLock.lockFile = ./Cargo.lock;
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "ha-app-ui-0.1.1" = "sha256-+dmnGRq9mQH3fiIFK6jNo9xfVDCVGDQ11kN8AxweeaI=";
+            "sqlx-0.9.0" = "sha256-kLvUfUy6vmL9LYU7nzHv+iB6cIJm2CjDf9Yo6wpWrWg=";
+          };
+        };
         cargoBuildFlags = ["--bin" "ha-maintenance"];
         # The real-binary HTTP tests run in the package build, too.
         cargoTestFlags = ["--test" "cli"];

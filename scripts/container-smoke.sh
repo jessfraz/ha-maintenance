@@ -437,8 +437,16 @@ docker volume create "$restored_volume" >/dev/null
 docker run --rm --interactive --user root --entrypoint /bin/tar \
     --mount "type=volume,source=$restored_volume,target=/data" \
     "$image" -C /data -xf - < "$scratch/data.tar"
+# Native Supervisor's copy step recreates UID10001 files as root:0644, rather
+# than preserving tar ownership/modes. Reproduce that before the production boot.
+docker run --rm --network none --cap-drop FOWNER --entrypoint /bin/sh \
+    --mount "type=volume,source=$restored_volume,target=/data" "$image" -ec '
+    find -P /data -xdev ! -type l -exec chown root:root -- {} +
+    find -P /data -xdev -type d -exec chmod 0755 -- {} +
+    find -P /data -xdev -type f -exec chmod 0644 -- {} +
+'
 docker rm "$container" >/dev/null
-docker run --detach --name "$container" \
+docker run --detach --name "$container" --cap-drop FOWNER \
     --publish 127.0.0.1::8080 \
     --mount "type=volume,source=$restored_volume,target=/data" \
     --env "MAINTENANCE_API_TOKEN=$token" \
@@ -673,4 +681,5 @@ request GET /v1/items/example-linked-item 200 --header "Authorization: Bearer $t
 cmp --silent "$scratch/linked-item.json" "$scratch/response.json"
 stop_container
 
-echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, strict recurring dates, protected instructions, HA device links, ephemeral registry, restart, and cold backup/restore."
+"$repo_root/scripts/private-data-smoke.sh" "$image"
+echo "Container smoke passed ($expected_arch): authentication, uid10001, private credentials, checklists/history, durable reorders, source-preserving migration, strict recurring dates, protected instructions, HA device links, ephemeral registry, restart, and root-created cold restore."

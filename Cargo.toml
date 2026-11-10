@@ -1,6 +1,6 @@
 [package]
 name = "home-maintenance"
-version = "0.10.7"
+version = "0.10.8"
 edition = "2024"
 license = "MIT"
 description = "Local maintenance schedules and history for Home Assistant"
@@ -8,6 +8,7 @@ repository = "https://github.com/jessfraz/ha-maintenance"
 default-run = "home-maintenance"
 
 [dependencies]
+ha-app-ui = { git = "https://github.com/jessfraz/ha-app-kit", rev = "a7b09c84ee35bf7c372dfcdc8614a0d48399af1c" }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
@@ -22,7 +23,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 slog = "2"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# Temporary upstream pin until a registry release permits the SQLite advisory fix.
+sqlx = { version = "0.9", git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
