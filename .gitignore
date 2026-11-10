@@ -20,3 +20,5 @@ __pycache__/
 credentials.json
 items.json
 options.json
+
+/custom_components/home_maintenance/_app_kit/

@@ -153,3 +153,33 @@ async def test_credential_failure_replaces_only_generic_availability(
     assert owned_issues(hass, entry) == {core_auth_key(entry)}
     overdue = hass.states.get("sensor.maintenance_overdue")
     assert overdue is not None and overdue.state == "unavailable"
+
+
+async def test_loaded_backend_version_repair_updates_with_the_owned_timer(
+    hass: HomeAssistant,
+    entry: MaintenanceConfigEntry,
+    backend: Backend,
+    freezer: FrozenDateTimeFactory,
+) -> None:
+    registry = ir.async_get(hass)
+    issue_id = f"{entry.entry_id}_version_mismatch"
+    backend.responses[("GET", "/v1/system")] = (
+        200,
+        b'{"credential_role":"integration","version":"9.8.7"}',
+        {},
+    )
+    freezer.tick(timedelta(minutes=1))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    mismatch = registry.async_get_issue(DOMAIN, issue_id)
+    assert mismatch is not None and mismatch.is_fixable
+    assert mismatch.config_entry_id == entry.entry_id
+    assert mismatch.translation_placeholders is not None
+    assert mismatch.translation_placeholders["app_version"] == "9.8.7"
+    assert issue(hass, entry) is None
+
+    backend.responses[("GET", "/v1/system")] = (503, b"{}", {})
+    freezer.tick(timedelta(minutes=1))
+    async_fire_time_changed(hass, dt_util.utcnow())
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert registry.async_get_issue(DOMAIN, issue_id) is mismatch

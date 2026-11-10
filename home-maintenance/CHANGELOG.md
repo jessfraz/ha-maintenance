@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.10
+
+- Repair app and companion version mismatches from Home Assistant Repairs.
+
 ## 0.10.9
 
 - Fix select spacing and let Dependabot track App Kit releases.
