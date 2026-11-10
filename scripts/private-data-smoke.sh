@@ -39,13 +39,16 @@ helper 'rm /volume/private/external-alias; printf "Fictional private state\n" > 
 
 # Internal publication links remain valid, but external symlink targets must not
 # be followed. Read-only outside storage makes accidental traversal observable.
-docker run --rm --network none --cap-drop FOWNER \
-    --mount "type=volume,source=$volume,target=/data,volume-subpath=private" \
-    --mount "type=volume,source=$volume,target=/outside,readonly" "$image" --version >/dev/null
-test "$(helper 'stat -c %a:%u:%g /volume/private')" = 700:10001:10001
-test "$(helper 'stat -c %a:%u:%g /volume/private/state')" = 600:10001:10001
-test "$(helper 'stat -c %a:%u:%g /volume/private/atomic-remnant')" = 600:10001:10001
-outside_unchanged
+# The second launch starts with10001-owned state, as an ordinary restart does.
+for _ in 1 2; do
+    docker run --rm --network none --cap-drop FOWNER \
+        --mount "type=volume,source=$volume,target=/data,volume-subpath=private" \
+        --mount "type=volume,source=$volume,target=/outside,readonly" "$image" --version >/dev/null
+    test "$(helper 'stat -c %a:%u:%g /volume/private')" = 700:10001:10001
+    test "$(helper 'stat -c %a:%u:%g /volume/private/state')" = 600:10001:10001
+    test "$(helper 'stat -c %a:%u:%g /volume/private/atomic-remnant')" = 600:10001:10001
+    outside_unchanged
+done
 
 # Refuse nested mounts before changing even the legitimate private files.
 docker create --name "$container" --network none --cap-drop FOWNER \
@@ -62,4 +65,4 @@ docker create --name "$container" --network none --cap-drop FOWNER \
     --entrypoint /bin/sh "$image" -ec 'rmdir /data; ln -s /outside /data; exec /usr/local/bin/docker-entrypoint.sh --version' >/dev/null
 refuse
 outside_unchanged
-printf '%s\n' 'Private-data boundary smoke passed: external hardlinks/mounts refused, internal publication links retained, external symlinks untouched, FOWNER not required.'
+printf '%s\n' 'Private-data boundary smoke passed: external hardlinks/mounts refused, internal publication links retained, external symlinks untouched, FOWNER not required on restore or ordinary restart.'
