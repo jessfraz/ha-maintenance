@@ -833,6 +833,24 @@ async fn script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>,
         "text/javascript; charset=utf-8",
     )
 }
+#[endpoint {method=GET,path="/app-kit.js",tags=["web"]}]
+async fn kit_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(ha_app_ui::SCRIPT.into(), "text/javascript; charset=utf-8")
+}
+#[endpoint {method=GET,path="/app-kit.css",tags=["web"]}]
+async fn kit_style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(ha_app_ui::STYLESHEET.into(), "text/css; charset=utf-8")
+}
+#[endpoint {method=GET,path="/shell.js",tags=["web"]}]
+async fn shell_script(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
+    ingress_access(&request)?;
+    static_response(
+        include_str!("../web/shell.js").into(),
+        "text/javascript; charset=utf-8",
+    )
+}
 #[endpoint {method=GET,path="/style.css",tags=["web"]}]
 async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, HttpError> {
     ingress_access(&request)?;
@@ -844,7 +862,7 @@ async fn style(request: RequestContext<Arc<Context>>) -> Result<Response<Body>, 
 
 pub fn description() -> Result<ApiDescription<Arc<Context>>> {
     let mut api = ApiDescription::new();
-    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 30] = [
+    let endpoints: [dropshot::ApiEndpoint<Arc<Context>>; 33] = [
         items_list.into(),
         items_create.into(),
         items_import.into(),
@@ -874,6 +892,9 @@ pub fn description() -> Result<ApiDescription<Arc<Context>>> {
         index.into(),
         detail.into(),
         script.into(),
+        kit_script.into(),
+        kit_style.into(),
+        shell_script.into(),
         style.into(),
     ];
     for endpoint in endpoints {

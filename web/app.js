@@ -1,5 +1,8 @@
 "use strict";
 
+import { shell } from "./shell.js";
+import { setNotice } from "./app-kit.js";
+
 const byId = (id) => document.getElementById(id);
 const base = new URL(document.baseURI);
 const isEmbedded = window.parent !== window;
@@ -50,8 +53,14 @@ function element(tag, text, className) {
 }
 
 function notice(message, error = false) {
-  byId("notice").textContent = message;
-  byId("notice").className = error ? "error" : "";
+  const target = byId("editor").open && error ? byId("edit-error")
+    : byId("detail").open ? byId(error ? "detail-error" : "detail-status") : null;
+  if (target) {
+    if (target.textContent !== message) target.textContent = message;
+    setNotice(byId("notice"), "");
+    return;
+  }
+  setNotice(byId("notice"), message, error ? "error" : "status");
 }
 
 function errorMessage(error) {
@@ -943,8 +952,6 @@ async function copyItemLink(item) {
   notice(
     "Item link copied. It contains no API token and can be written to an NFC tag.",
   );
-  byId("detail-status").textContent =
-    "NFC link copied. It contains no API token.";
 }
 
 async function openDetail(id, updateRoute = true) {
@@ -1091,8 +1098,6 @@ async function completeItem(item) {
       ? `${updated.summary} recorded. Next due ${dateLabel(updated.occurrence.due)}.`
       : `${updated.summary} recorded.`;
   notice(result);
-  if (selected?.id === item.id)
-    byId("detail-status").textContent = result;
   await load().catch((error) =>
     notice(
       `Maintenance was recorded, but the queue could not be refreshed. ${errorMessage(error)}`,
@@ -1283,8 +1288,6 @@ async function archiveItem(item) {
       ? "Item restored to the maintenance queue."
       : "Item archived. Its history and NFC link are preserved.";
   notice(message);
-  if (selected?.id === item.id)
-    byId("detail-status").textContent = message;
   await load().catch((error) =>
     notice(
       `The item was ${item.archived ? "restored" : "archived"}, but the queue could not be refreshed. ${errorMessage(error)}`,
@@ -1527,6 +1530,7 @@ async function saveItem() {
   byId("item-fields").disabled = true;
   byId("save").disabled = true;
   byId("close-editor").disabled = true;
+  byId("cancel-editor").disabled = true;
   byId("edit-error").textContent = "";
   let updated;
   try {
@@ -1553,11 +1557,11 @@ async function saveItem() {
     byId("item-fields").disabled = false;
     byId("save").disabled = !byId("reload-edit").hidden;
     byId("close-editor").disabled = false;
+    byId("cancel-editor").disabled = false;
   }
   byId("editor").close();
   editing = null;
   createRequest = null;
-  notice(current ? "Maintenance item updated." : "Maintenance item added.");
   const refreshes = await Promise.allSettled([load(), openDetail(updated.id)]);
   const failure = refreshes.find((result) => result.status === "rejected");
   if (failure)
@@ -1565,6 +1569,7 @@ async function saveItem() {
       `Your item was saved, but the display could not be refreshed. ${errorMessage(failure.reason)}`,
       true,
     );
+  else notice(current ? "Maintenance item updated." : "Maintenance item added.");
 }
 
 function renderInstallation(data) {
@@ -1619,10 +1624,8 @@ function renderSystem(system) {
     !canManageInstructions;
   byId("add").hidden = !isOwner;
   byId("installation").hidden = !isOwner;
-  byId("app-version").textContent = system.version;
-  byId("service-status").textContent = system.integration_connected
-    ? "Home Assistant connected"
-    : "Home Assistant not paired";
+  shell.setVersion(system.version);
+  shell.setStatus(system.integration_connected ? "Home Assistant connected" : "Home Assistant not paired", system.integration_connected ? "ok" : "neutral");
   byId("app-footer").hidden = false;
 }
 
@@ -1740,6 +1743,7 @@ function closeEditor() {
   if (!editorBusy) byId("editor").close();
 }
 byId("close-editor").addEventListener("click", closeEditor);
+byId("cancel-editor").addEventListener("click", closeEditor);
 byId("editor").addEventListener("cancel", (event) => {
   if (editorBusy) event.preventDefault();
 });

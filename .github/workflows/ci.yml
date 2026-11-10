@@ -63,6 +63,6 @@ jobs:
           fetch-depth: 0
       - run: scripts/check-public-tree
       - run: scripts/check-release-version
-      - run: bash -n scripts/container-smoke.sh
+      - run: bash -n scripts/container-smoke.sh scripts/private-data-smoke.sh
       - run: sh -n docker-entrypoint.sh
-      - run: shellcheck scripts/container-smoke.sh docker-entrypoint.sh
+      - run: shellcheck scripts/container-smoke.sh scripts/private-data-smoke.sh docker-entrypoint.sh

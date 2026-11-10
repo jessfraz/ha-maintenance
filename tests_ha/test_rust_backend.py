@@ -1561,3 +1561,48 @@ async def test_permanent_deletion_through_ha_preserves_revision_and_refreshes_en
     assert state.state == "0"
     assert entry.runtime_data.data is not None
     assert entry.runtime_data.data.items == ()
+
+
+async def test_long_editor_keeps_actions_and_close_in_view(
+    rust_backend: RustBackend,
+) -> None:
+    """A long mobile form scrolls its fields, not its escape or save actions."""
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            page = await browser.new_page(viewport={"width": 390, "height": 844})
+            await page.goto(rust_backend.origin)
+            await page.get_by_label("API token", exact=True).fill(
+                rust_backend.owner_token
+            )
+            await page.get_by_role("button", name="Connect", exact=True).click()
+            await page.get_by_role("button", name="Add item", exact=True).click()
+            editor = page.get_by_role("dialog", name="Add maintenance item")
+            save = editor.get_by_role("button", name="Add item", exact=True)
+            cancel = editor.get_by_role("button", name="Cancel", exact=True)
+            close = editor.get_by_role("button", name="Close editor", exact=True)
+            await expect(save).to_be_in_viewport(ratio=1)
+            await expect(cancel).to_be_in_viewport(ratio=1)
+            await editor.locator("#item-fields").hover()
+            await page.mouse.wheel(0, 2000)
+            await expect(editor.get_by_label("Reorder link")).to_be_in_viewport(ratio=1)
+            await expect(save).to_be_in_viewport(ratio=1)
+            await expect(close).to_be_in_viewport(ratio=1)
+            await cancel.click()
+            await expect(editor).not_to_be_visible()
+            await expect(page.get_by_role("button", name="Add item")).to_be_focused()
+            await page.get_by_role("button", name="Add item", exact=True).click()
+            await editor.get_by_label("Item name", exact=True).fill("Example task")
+            await editor.get_by_label("Task summary", exact=True).fill(
+                "Verify the example item"
+            )
+            await editor.get_by_label("Item ID", exact=True).fill("example-ui-created")
+            await save.click()
+            detail = page.get_by_role("dialog", name="Verify the example item")
+            await expect(detail).to_be_visible()
+            await expect(detail.locator("#detail-status")).to_have_text(
+                "Maintenance item added."
+            )
+            await expect(page.locator("#notice")).to_be_empty()
+        finally:
+            await browser.close()
