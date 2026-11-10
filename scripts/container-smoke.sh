@@ -430,21 +430,42 @@ check_item
 # Cold backup: copy the stopped application's complete data volume, restore it
 # into a fresh volume, and verify through a fresh running service.
 stop_container
-docker run --rm --user root --entrypoint /bin/tar \
-    --mount "type=volume,source=$volume,target=/data,readonly" \
-    "$image" -C /data -cf - . > "$scratch/data.tar"
+case $expected_arch in
+    amd64) supervisor_image='ghcr.io/home-assistant/amd64-hassio-supervisor@sha256:f5f3728cf7a9a637485576c7588d209a1527fe9d6bb46f7326ef9aa629c55713' ;;
+    arm64) supervisor_image='ghcr.io/home-assistant/aarch64-hassio-supervisor@sha256:0f606324063cd5e7e591fb71efb5214ff56a05514898e33e461757950abc2914' ;;
+    *) echo 'Unsupported native restore architecture' >&2; exit 1 ;;
+esac
 docker volume create "$restored_volume" >/dev/null
-docker run --rm --interactive --user root --entrypoint /bin/tar \
-    --mount "type=volume,source=$restored_volume,target=/data" \
-    "$image" -C /data -xf - < "$scratch/data.tar"
-# Native Supervisor's copy step recreates UID10001 files as root:0644, rather
-# than preserving tar ownership/modes. Reproduce that before the production boot.
-docker run --rm --network none --cap-drop FOWNER --entrypoint /bin/sh \
-    --mount "type=volume,source=$restored_volume,target=/data" "$image" -ec '
-    find -P /data -xdev ! -type l -exec chown root:root -- {} +
-    find -P /data -xdev -type d -exec chmod 0755 -- {} +
-    find -P /data -xdev -type f -exec chmod 0644 -- {} +
-'
+# Use Supervisor's actual encrypted producer/extractor and copytree restore.
+# Its FOWNER-dropped boundary recreates worker-owned files as root:0644.
+docker run --rm --network none --read-only --cap-drop FOWNER \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec \
+    --mount "type=volume,source=$volume,target=/source,readonly" \
+    --mount "type=volume,source=$restored_volume,target=/restored" \
+    --entrypoint python3 --interactive "$supervisor_image" - credentials.json maintenance.sqlite3 <<'PY'
+import io
+from pathlib import Path
+import shutil
+import sys
+import tarfile
+import tempfile
+from securetar import SecureTarArchive, SecureTarFile, atomic_contents_add
+
+password = "container-native-restore-only"
+encrypted = io.BytesIO()
+with SecureTarArchive(fileobj=encrypted, mode="w", password=password, create_version=3) as archive:
+    with archive.create_tar("./app.tar.gz") as private:
+        atomic_contents_add(private, Path("/source"), file_filter=lambda _: False, arcname="data")
+encrypted.seek(0)
+with tempfile.TemporaryDirectory() as extracted, tarfile.open(fileobj=encrypted, mode="r:") as outer:
+    member = next(item for item in outer if item.name.endswith("app.tar.gz"))
+    with SecureTarFile(fileobj=outer.extractfile(member), password=password, gzip=True) as private:
+        private.extractall(path=extracted, filter="tar")
+    shutil.copytree(Path(extracted, "data"), "/restored", symlinks=True, dirs_exist_ok=True)
+for name in sys.argv[1:]:
+    metadata = Path("/restored", name).stat()
+    assert metadata.st_uid == 0 and metadata.st_mode & 0o777 == 0o644
+PY
 docker rm "$container" >/dev/null
 docker run --detach --name "$container" --cap-drop FOWNER \
     --publish 127.0.0.1::8080 \
