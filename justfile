@@ -14,6 +14,7 @@ rust:
     cargo test --locked --all-features
 
 ha:
+    uv run --frozen python scripts/build-integration
     cargo build --locked --bin home-maintenance
     uv sync --frozen
     uv run --frozen ruff check custom_components tests_ha tests_frontend scripts/check-public-tree scripts/check-release-version
@@ -37,3 +38,6 @@ openapi:
 container:
     docker build --tag ha-maintenance:smoke .
     ./scripts/container-smoke.sh ha-maintenance:smoke "$(docker image inspect ha-maintenance:smoke --format '{{{{.Architecture}}')"
+
+integration-zip:
+    uv run --frozen python scripts/build-integration --output work

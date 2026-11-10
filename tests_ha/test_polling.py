@@ -51,7 +51,8 @@ async def test_native_entities_follow_the_entire_inventory(
         return web.json_response({"items": [item_record()], "next_page": "next+page"})
 
     app = web.Application()
-    app.router.add_get("/{path:.*}", handle)
+    app.router.add_get("/v1/summary", handle)
+    app.router.add_get("/v1/items", handle)
     server = await aiohttp_server(app)
     entry = MockConfigEntry(
         domain=DOMAIN,

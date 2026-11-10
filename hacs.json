@@ -1,4 +1,6 @@
 {
   "name": "Maintenance",
-  "homeassistant": "2026.11.0"
+  "homeassistant": "2026.11.0",
+  "zip_release": true,
+  "filename": "home_maintenance.zip"
 }

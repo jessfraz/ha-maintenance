@@ -92,6 +92,9 @@ nix develop
 just check
 ```
 
+Build `home_maintenance.zip` with `just integration-zip`. Attach the ZIP from
+`work/` before publishing the release.
+
 `just check` runs formatting, Clippy, Ruff, ty, privacy and version checks, and
 Rust and Home Assistant tests. The integration tests use the compiled Rust
 service. `just security` audits dependencies; `just container` tests the native
