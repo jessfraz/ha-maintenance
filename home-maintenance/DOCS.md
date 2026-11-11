@@ -277,7 +277,7 @@ docker run --detach --name maintenance --restart unless-stopped \
   --mount type=volume,source=maintenance-data,target=/data \
   --env MAINTENANCE_API_TOKEN \
   --env MAINTENANCE_INTEGRATION_TOKEN \
-  ghcr.io/jessfraz/ha-maintenance:0.10.11
+  ghcr.io/jessfraz/ha-maintenance:0.10.12
 ```
 
 The image supports amd64 and arm64. The server runs as uid 10001 and keeps its
