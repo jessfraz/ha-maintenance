@@ -45,7 +45,7 @@ jobs:
       - run: uv sync --frozen
       - name: Install the built Marketplace integration
         run: |
-          uv run --frozen python scripts/build-integration --output "$RUNNER_TEMP/marketplace"
+          uv run --frozen python scripts/build-integration --check-brand home-maintenance --output "$RUNNER_TEMP/marketplace"
           mv custom_components/home_maintenance "$RUNNER_TEMP/home_maintenance-source"
           uv run --frozen python -m zipfile -e "$RUNNER_TEMP/marketplace/home_maintenance.zip" custom_components/home_maintenance
       - run: uv run --frozen ruff check custom_components tests_ha tests_frontend scripts/check-public-tree scripts/check-release-version

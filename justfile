@@ -40,4 +40,4 @@ container:
     ./scripts/container-smoke.sh ha-maintenance:smoke "$(docker image inspect ha-maintenance:smoke --format '{{{{.Architecture}}')"
 
 integration-zip:
-    uv run --frozen python scripts/build-integration --output work
+    uv run --frozen python scripts/build-integration --check-brand home-maintenance --output work
