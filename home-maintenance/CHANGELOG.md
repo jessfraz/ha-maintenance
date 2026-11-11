@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.11
+
+- Match the Home Assistant App and Marketplace icons to the sidebar.
+
 ## 0.10.10
 
 - Repair app and companion version mismatches from Home Assistant Repairs.
