@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.12
+
+- Show specific version repair failures and allow retrying the version check.
+
 ## 0.10.11
 
 - Match the Home Assistant App and Marketplace icons to the sidebar.
