@@ -10,15 +10,18 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
+from ._app_kit.repairs import async_check_startup_version
 from ._app_kit.version import LOADED_VERSION
 from .card import MaintenanceCardView
 from .client import MaintenanceClient
 from .const import CONF_ADDON_SLUG, CONF_BACKEND_URL, CONF_TOKEN, DOMAIN
 from .coordinator import MaintenanceCoordinator
 from .http import MaintenanceView
+from .repairs import VERSION_REPAIR
 from .services import async_register_services
 
 PLATFORMS = [
@@ -59,7 +62,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MaintenanceConfigEntry) 
         entry.data[CONF_TOKEN],
     )
     coordinator = MaintenanceCoordinator(hass, entry, client, LOADED_VERSION)
-    await coordinator.async_config_entry_first_refresh()
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady:
+        await async_check_startup_version(hass, entry, VERSION_REPAIR)
+        raise
     entry.runtime_data = coordinator
     coordinator.repairs.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

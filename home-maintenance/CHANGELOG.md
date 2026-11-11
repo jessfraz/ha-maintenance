@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.13
+
+- Keep the one-click version repair usable when an older app prevents
+  the integration from starting.
+
 ## 0.10.12
 
 - Show specific version repair failures and allow retrying the version check.
