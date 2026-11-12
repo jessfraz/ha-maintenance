@@ -190,6 +190,7 @@ h3 {
 }
 .search {
   flex: 1;
+  min-width: 0;
 }
 .view-filter {
   width: 185px;
@@ -364,7 +365,7 @@ dialog .dialog-heading h2 {
 }
 .timing {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 0 0 26px;
 }
@@ -490,8 +491,8 @@ dialog .dialog-heading h2 {
 }
 .checklist-editor-row button {
   padding: 0;
-  width: 34px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   margin-bottom: 8px;
   flex-shrink: 0;
 }
@@ -546,8 +547,11 @@ dialog .dialog-heading h2 {
   gap: 10px;
 }
 .resources a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--control-radius, 8px);
   padding: 9px 12px;
   font-size: 13px;
   text-decoration: none;
@@ -614,7 +618,7 @@ dialog .dialog-heading h2 {
 }
 .columns {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 .columns label {
@@ -638,7 +642,7 @@ dialog .dialog-heading h2 {
   font-size: 13px;
 }
 .schedule-fields {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .editor-section {
   margin: 22px 0;
@@ -651,7 +655,7 @@ dialog .dialog-heading h2 {
 }
 .metadata-row {
   display: grid;
-  grid-template-columns: 1fr 1.4fr auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
   gap: 10px;
   align-items: end;
 }
@@ -660,8 +664,8 @@ dialog .dialog-heading h2 {
 }
 .metadata-row button {
   margin-bottom: 6px;
-  height: 42px;
-  width: 42px;
+  height: 44px;
+  width: 44px;
   padding: 0;
   font-size: 20px;
 }
