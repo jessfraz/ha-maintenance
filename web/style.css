@@ -127,9 +127,8 @@ h3 {
   color: var(--stat-ink);
   text-align: left;
 }
-.summary-stat:not(:disabled):not([aria-pressed="true"]):hover {
-  background: var(--soft);
-  opacity: 1;
+@media (hover: hover) and (pointer: fine) {
+  .summary-stat:not(:disabled):not([aria-pressed="true"]):hover { background: var(--soft); }
 }
 .summary-stat[aria-pressed="true"] {
   background: var(--stat-fill);
@@ -237,8 +236,8 @@ h3 {
   margin: 0 0 4px;
   overflow-wrap: anywhere;
 }
-.item-card a:hover {
-  text-decoration: underline;
+@media (hover: hover) and (pointer: fine) {
+  .item-card a:hover { text-decoration: underline; }
 }
 .item-meta {
   color: var(--muted);
@@ -557,8 +556,8 @@ dialog .dialog-heading h2 {
   text-decoration: none;
   overflow-wrap: anywhere;
 }
-.resources a:hover {
-  background: var(--soft);
+@media (hover: hover) and (pointer: fine) {
+  .resources a:hover { background: var(--soft); }
 }
 .actions {
   display: flex;
@@ -574,8 +573,8 @@ dialog .dialog-heading h2 {
   color: var(--red-ink);
   border-color: var(--red-line);
 }
-.actions .delete-action:hover {
-  background: var(--red-fill);
+@media (hover: hover) and (pointer: fine) {
+  .actions .delete-action:not(:disabled):hover { background: var(--red-fill); }
 }
 .completion-help {
   flex-basis: 100%;
