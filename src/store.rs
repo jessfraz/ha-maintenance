@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use crate::calendar::{Date, Timestamp};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{
@@ -173,7 +173,7 @@ struct CompletionRow {
     source: Option<String>,
 }
 
-fn sort_due(due: Option<NaiveDate>) -> String {
+fn sort_due(due: Option<Date>) -> String {
     due.map(|date| date.to_string())
         .unwrap_or_else(|| "9999-12-31".into())
 }
@@ -187,16 +187,14 @@ fn parse_status(value: &str) -> Result<ItemStatus, Error> {
 fn corrupt() -> Error {
     Error::Corrupt
 }
-fn parse_date(value: &str) -> Result<NaiveDate, Error> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| corrupt())
+fn parse_date(value: &str) -> Result<Date, Error> {
+    Date::parse_storage(value).map_err(|_| corrupt())
 }
 fn parse_uuid(value: &str) -> Result<Uuid, Error> {
     Uuid::parse_str(value).map_err(|_| corrupt())
 }
-fn parse_time(value: &str) -> Result<DateTime<Utc>, Error> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|time| time.with_timezone(&Utc))
-        .map_err(|_| corrupt())
+fn parse_time(value: &str) -> Result<Timestamp, Error> {
+    Timestamp::parse_storage(value).map_err(|_| corrupt())
 }
 impl TryFrom<ItemRow> for Item {
     type Error = Error;
@@ -271,7 +269,7 @@ impl TryFrom<CompletionRow> for Completion {
 #[serde(deny_unknown_fields)]
 struct ItemCursor {
     archived: bool,
-    due: Option<NaiveDate>,
+    due: Option<Date>,
     id: ItemId,
 }
 #[derive(Serialize, Deserialize)]
@@ -673,13 +671,9 @@ impl Store {
             .await?;
         let completed_at = parse_time(&now)?;
         let next_due = match item.definition.schedule {
-            Schedule::Recurring { interval } => Some(
-                interval.next(
-                    completed_at
-                        .with_timezone(&item.definition.timezone.0)
-                        .date_naive(),
-                )?,
-            ),
+            Schedule::Recurring { interval } => {
+                Some(interval.next(completed_at.local_date(&item.definition.timezone.0)?)?)
+            }
             Schedule::Once | Schedule::Standing => None,
             Schedule::Instruction => {
                 return Err(Error::Conflict("instructions cannot be completed"));
@@ -940,7 +934,7 @@ impl Store {
         // bounded keyset pages; instructions, household metadata and history are
         // not needed to compute due counts.
         let mut transaction = self.pool.begin().await?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut summary = Summary {
             active: 0,
             overdue: 0,
@@ -963,7 +957,7 @@ impl Store {
             for row in &rows {
                 let zone = crate::models::TimeZone::try_from(row.timezone.clone())
                     .map_err(|_| corrupt())?;
-                let today = now.with_timezone(&zone.0).date_naive();
+                let today = now.local_date(&zone.0)?;
                 summary.active += 1;
                 let Some(due) = row.due.as_deref().map(parse_date).transpose()? else {
                     continue;
@@ -971,11 +965,7 @@ impl Store {
                 if due < today {
                     summary.overdue += 1;
                 }
-                if due >= today
-                    && today
-                        .checked_add_days(Days::new(14))
-                        .is_some_and(|end| due <= end)
-                {
+                if due >= today && today.checked_add_days(14).is_some_and(|end| due <= end) {
                     summary.due_soon += 1;
                 }
             }
@@ -1214,7 +1204,7 @@ async fn insert_imported_completion(
         .bind(event.id.unwrap_or_else(Uuid::now_v7).to_string())
         .bind(item.as_ref())
         .bind(event.occurrence_id.map(|id| id.to_string()))
-        .bind(event.completed_at.map(|at| at.to_rfc3339()))
+        .bind(event.completed_at.map(|at| at.to_storage()))
         .bind(
             event
                 .actor
@@ -1296,7 +1286,7 @@ fn create_fingerprint(input: &CreateItem) -> Result<Vec<u8>, Error> {
     #[derive(Serialize)]
     struct LegacyCreate<'a> {
         id: &'a ItemId,
-        due: NaiveDate,
+        due: Date,
         name: &'a str,
         summary: &'a str,
         description: &'a Option<String>,
@@ -1324,7 +1314,7 @@ fn create_fingerprint(input: &CreateItem) -> Result<Vec<u8>, Error> {
                 name: &definition.name,
                 summary: &definition.summary,
                 description: &definition.description,
-                timezone: definition.timezone,
+                timezone: definition.timezone.clone(),
                 location: &definition.location,
                 group: &definition.group,
                 schedule: interval,
@@ -1441,8 +1431,7 @@ mod tests {
             for index in 0..200 {
                 let mut input = seed.items[0].clone();
                 input.id = format!("example-{batch:02}-{index:03}").try_into().unwrap();
-                input.due =
-                    Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap());
+                input.due = Some(Date::new(2031, 1 + (index % 12), 1 + index % 27).unwrap());
                 items.push(input);
             }
             store
@@ -1856,7 +1845,7 @@ mod tests {
             completed_at: Some(at),
             actor: Some(actor.clone()),
             previous_due: input.due,
-            next_due: Some(NaiveDate::from_ymd_opt(2031, 4, 5).unwrap()),
+            next_due: Some(Date::new(2031, 4, 5).unwrap()),
             checklist: checked.occurrence.checklist.clone(),
             source: None,
         };
@@ -1864,7 +1853,7 @@ mod tests {
             .bind(event.id.to_string())
             .bind(input.id.as_ref())
             .bind(original.occurrence.id.to_string())
-            .bind(at.to_rfc3339())
+            .bind(at.to_storage())
             .bind(serde_json::to_string(&actor).unwrap())
             .bind(event.previous_due.unwrap().to_string())
             .bind(event.next_due.unwrap().to_string())
@@ -2219,12 +2208,7 @@ mod tests {
                         item.revision,
                         crate::models::UpdateItem {
                             due: crate::models::Change(Some(Some(
-                                NaiveDate::from_ymd_opt(
-                                    if index % 2 == 0 { 2030 } else { 2032 },
-                                    1,
-                                    1,
-                                )
-                                .unwrap(),
+                                Date::new(if index % 2 == 0 { 2030 } else { 2032 }, 1, 1).unwrap(),
                             ))),
                             ..Default::default()
                         },
@@ -2272,7 +2256,7 @@ mod tests {
                 input.due = if index % 4 == 0 {
                     None
                 } else {
-                    Some(NaiveDate::from_ymd_opt(2031, 1 + (index % 12), 1 + index % 27).unwrap())
+                    Some(Date::new(2031, 1 + (index % 12), 1 + index % 27).unwrap())
                 };
                 if input.due.is_none() {
                     input.definition.schedule = Schedule::Once;
@@ -2303,7 +2287,7 @@ mod tests {
                 });
                 sqlx::query("INSERT INTO items(id,definition,revision,archived,occurrence_id,due,checklist) VALUES(?,?,1,?,?,?,?)")
                     .bind(input.id.as_ref()).bind(serde_json::to_string(&input.definition).unwrap()).bind(index%5==0).bind(Uuid::now_v7().to_string())
-                    .bind(input.due.unwrap_or_else(|| NaiveDate::from_ymd_opt(2031,1,1).unwrap()).to_string()).bind("[]").execute(&legacy).await.unwrap();
+                    .bind(input.due.unwrap_or_else(|| Date::new(2031,1,1).unwrap()).to_string()).bind("[]").execute(&legacy).await.unwrap();
             }
             store
                 .migrate(
@@ -2579,7 +2563,7 @@ mod tests {
             .unwrap();
         let seed: ImportCatalog =
             serde_json::from_str(include_str!("../config/items.example.json")).unwrap();
-        let today = Utc::now().date_naive();
+        let today = Timestamp::now().utc_date();
         let mut inputs = Vec::new();
         for index in 0..700 {
             let mut input = seed.items[0].clone();
@@ -3100,7 +3084,7 @@ mod tests {
             status: ItemStatus::NeedsAction,
             archived: false,
             history: vec![ImportedCompletion {
-                completed_at: Some(Utc::now()),
+                completed_at: Some(Timestamp::now()),
                 ..Default::default()
             }],
         };
@@ -3420,7 +3404,7 @@ mod tests {
             id: Uuid::now_v7(),
             item_id: item.id.clone(),
             item_revision: completed.revision,
-            requested_at: Utc::now(),
+            requested_at: Timestamp::now(),
             actor: actor.clone(),
             item: ReorderContent {
                 name: input.definition.name.clone(),

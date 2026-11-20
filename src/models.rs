@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 
-use chrono::{DateTime, Datelike, Days, Months, NaiveDate, Utc};
-use chrono_tz::Tz;
+use crate::calendar::{Date, Timestamp};
 use schemars::{JsonSchema, schema::Schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -41,21 +40,37 @@ impl AsRef<str> for ItemId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct TimeZone(#[schemars(with = "String")] pub Tz);
+pub struct TimeZone(pub jiff::tz::TimeZone, String);
+impl JsonSchema for TimeZone {
+    fn schema_name() -> String {
+        "TimeZone".to_owned()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::TimeZone"))
+    }
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
+        String::json_schema(generator)
+    }
+}
 impl TryFrom<String> for TimeZone {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        value
-            .parse()
-            .map(Self)
-            .map_err(|_| "timezone must be an IANA timezone")
+        // The bundled lookup is case-insensitive, but the maintenance wire
+        // contract accepts only exact IANA names and keeps aliases verbatim.
+        // Factory is a TZif placeholder, not a previously accepted zone.
+        let (name, data) = jiff_tzdb::get(&value)
+            .filter(|(name, _)| *name == value && *name != "Factory")
+            .ok_or("timezone must be an IANA timezone")?;
+        let zone = jiff::tz::TimeZone::tzif(name, data)
+            .map_err(|_| "timezone must be an IANA timezone")?;
+        Ok(Self(zone, value))
     }
 }
 impl From<TimeZone> for String {
     fn from(value: TimeZone) -> Self {
-        value.0.name().into()
+        value.1
     }
 }
 
@@ -105,9 +120,9 @@ impl Interval {
         })
     }
     /// Calendar arithmetic precedes day arithmetic; clamp month ends, never roll into the next month.
-    pub fn next(self, from: NaiveDate) -> Result<NaiveDate, Error> {
-        from.checked_add_months(Months::new(self.years * 12 + self.months))
-            .and_then(|date| date.checked_add_days(Days::new(u64::from(self.days))))
+    pub fn next(self, from: Date) -> Result<Date, Error> {
+        from.checked_add_months(self.years * 12 + self.months)
+            .and_then(|date| date.checked_add_days(u64::from(self.days)))
             .filter(|date| validate_date(*date).is_ok())
             .ok_or(Error::Invalid(
                 "next due date is outside the supported calendar",
@@ -132,7 +147,7 @@ impl Schedule {
             interval: Interval::new(days, months, years)?,
         })
     }
-    pub fn next(self, from: NaiveDate) -> Result<NaiveDate, Error> {
+    pub fn next(self, from: Date) -> Result<Date, Error> {
         match self {
             Self::Recurring { interval } => interval.next(from),
             _ => Err(Error::Invalid("only recurring tasks have a next due date")),
@@ -163,7 +178,7 @@ pub struct ChecklistStep {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StepCompletion {
-    pub completed_at: DateTime<Utc>,
+    pub completed_at: Timestamp,
     pub actor: Actor,
 }
 
@@ -301,9 +316,9 @@ fn url(value: &str) -> Result<(), Error> {
     }
     Ok(())
 }
-pub fn validate_date(date: NaiveDate) -> Result<(), Error> {
+pub fn validate_date(date: Date) -> Result<(), Error> {
     // An all-day calendar event also needs a representable exclusive end date.
-    if date.year() < 1 || date.succ_opt().is_none_or(|end| end.year() > 9999) {
+    if date.year() < 1 || date.checked_add_days(1).is_none_or(|end| end.year() > 9999) {
         return Err(Error::Invalid(
             "due date must be between 0001-01-01 and 9999-12-30",
         ));
@@ -316,7 +331,7 @@ pub fn validate_date(date: NaiveDate) -> Result<(), Error> {
 pub struct CreateItem {
     pub id: ItemId,
     #[serde(default)]
-    pub due: Option<NaiveDate>,
+    pub due: Option<Date>,
     #[serde(flatten)]
     pub definition: Definition,
 }
@@ -328,7 +343,7 @@ impl CreateItem {
 }
 
 /// Recurring tasks always have a concrete first due date. Instructions never do.
-pub fn validate_due(schedule: Schedule, due: Option<NaiveDate>) -> Result<(), Error> {
+pub fn validate_due(schedule: Schedule, due: Option<Date>) -> Result<(), Error> {
     match (schedule, due) {
         (Schedule::Recurring { .. }, None) => {
             Err(Error::Invalid("recurring tasks require a due date"))
@@ -397,7 +412,7 @@ pub struct UpdateItem {
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub schedule: Change<Schedule>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
-    pub due: Change<Option<NaiveDate>>,
+    pub due: Change<Option<Date>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
     pub instructions: Change<Vec<String>>,
     #[serde(default, skip_serializing_if = "Change::is_missing")]
@@ -412,11 +427,7 @@ pub struct UpdateItem {
     pub home_assistant: Change<Vec<HomeAssistantReference>>,
 }
 impl UpdateItem {
-    pub fn apply(
-        self,
-        definition: &mut Definition,
-        due: &mut Option<NaiveDate>,
-    ) -> Result<(), Error> {
+    pub fn apply(self, definition: &mut Definition, due: &mut Option<Date>) -> Result<(), Error> {
         self.name.apply(&mut definition.name);
         self.summary.apply(&mut definition.summary);
         self.description.apply(&mut definition.description);
@@ -466,7 +477,7 @@ impl Actor {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Occurrence {
     pub id: Uuid,
-    pub due: Option<NaiveDate>,
+    pub due: Option<Date>,
     pub checklist: Vec<ChecklistStepState>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -474,10 +485,10 @@ pub struct Completion {
     pub id: Uuid,
     pub item_id: ItemId,
     pub occurrence_id: Option<Uuid>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     pub actor: Option<Actor>,
-    pub previous_due: Option<NaiveDate>,
-    pub next_due: Option<NaiveDate>,
+    pub previous_due: Option<Date>,
+    pub next_due: Option<Date>,
     #[serde(default)]
     pub source: Option<SourceRef>,
     pub checklist: Vec<ChecklistStepState>,
@@ -544,7 +555,7 @@ pub struct ReorderReceipt {
     pub id: Uuid,
     pub item_id: ItemId,
     pub item_revision: i64,
-    pub requested_at: DateTime<Utc>,
+    pub requested_at: Timestamp,
     pub actor: Actor,
     pub item: ReorderContent,
 }
@@ -593,7 +604,7 @@ pub struct Reorder {
     pub request: ReorderReceipt,
     pub status: ReorderStatus,
     pub revision: i64,
-    pub resolved_at: Option<DateTime<Utc>>,
+    pub resolved_at: Option<Timestamp>,
     pub resolved_by: Option<Actor>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -641,10 +652,10 @@ pub struct ImportedCompletion {
     pub id: Option<Uuid>,
     pub occurrence_id: Option<Uuid>,
     pub source: Option<SourceRef>,
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     pub actor: Option<Actor>,
-    pub previous_due: Option<NaiveDate>,
-    pub next_due: Option<NaiveDate>,
+    pub previous_due: Option<Date>,
+    pub next_due: Option<Date>,
     #[serde(default)]
     pub checklist: Vec<ChecklistStepState>,
 }
@@ -753,59 +764,52 @@ pub struct Summary {
 
 #[cfg(test)]
 mod tests {
+    use crate::calendar::{Date, Timestamp};
     use crate::models::{CreateItem, ItemId, Schedule, TimeZone};
-    use chrono::{Datelike, NaiveDate, TimeZone as _, Utc};
     #[test]
     fn calendar_intervals_clamp_month_ends_and_leap_years() {
         let monthly = Schedule::new(0, 1, 0).unwrap();
         assert_eq!(
-            monthly
-                .next(NaiveDate::from_ymd_opt(2031, 1, 31).unwrap())
-                .unwrap(),
-            NaiveDate::from_ymd_opt(2031, 2, 28).unwrap()
+            monthly.next(Date::new(2031, 1, 31).unwrap()).unwrap(),
+            Date::new(2031, 2, 28).unwrap()
         );
         let yearly = Schedule::new(0, 0, 1).unwrap();
         assert_eq!(
-            yearly
-                .next(NaiveDate::from_ymd_opt(2032, 2, 29).unwrap())
-                .unwrap(),
-            NaiveDate::from_ymd_opt(2033, 2, 28).unwrap()
+            yearly.next(Date::new(2032, 2, 29).unwrap()).unwrap(),
+            Date::new(2033, 2, 28).unwrap()
         );
         assert!(Schedule::new(0, 0, 0).is_err());
-        assert!(
-            yearly
-                .next(NaiveDate::from_ymd_opt(9999, 1, 1).unwrap())
-                .is_err()
-        );
+        assert!(yearly.next(Date::new(9999, 1, 1).unwrap()).is_err());
         let daily = Schedule::new(1, 0, 0).unwrap();
         assert_eq!(
-            daily
-                .next(NaiveDate::from_ymd_opt(9999, 12, 29).unwrap())
-                .unwrap(),
-            NaiveDate::from_ymd_opt(9999, 12, 30).unwrap()
+            daily.next(Date::new(9999, 12, 29).unwrap()).unwrap(),
+            Date::new(9999, 12, 30).unwrap()
         );
-        assert!(
-            daily
-                .next(NaiveDate::from_ymd_opt(9999, 12, 30).unwrap())
-                .is_err()
-        );
+        assert!(daily.next(Date::new(9999, 12, 30).unwrap()).is_err());
     }
     #[test]
     fn recurrence_uses_local_calendar_dates_across_dst() {
         let timezone = TimeZone::try_from("America/New_York".to_owned()).unwrap();
         for date in [(2031, 3, 9), (2031, 11, 2)] {
-            let utc = Utc
-                .with_ymd_and_hms(date.0, date.1, date.2, 0, 30, 0)
+            let utc = format!("{:04}-{:02}-{:02}T00:30:00Z", date.0, date.1, date.2)
+                .parse::<Timestamp>()
                 .unwrap();
-            let local = utc.with_timezone(&timezone.0);
-            let next = Schedule::new(1, 0, 0)
-                .unwrap()
-                .next(local.date_naive())
-                .unwrap();
-            assert_eq!(next.signed_duration_since(local.date_naive()).num_days(), 1);
-            assert_eq!(next.day(), date.2);
+            let local = utc.local_date(&timezone.0).unwrap();
+            let next = Schedule::new(1, 0, 0).unwrap().next(local).unwrap();
+            assert_eq!(next, local.checked_add_days(1).unwrap());
+            assert_eq!(next, Date::new(date.0, date.1, date.2).unwrap());
         }
     }
+    #[test]
+    fn calendar_wire_preservation_future_local_dates() {
+        let zone = TimeZone::try_from("America/New_York".to_owned()).unwrap();
+        let instant = "2101-07-01T04:30:00Z".parse::<Timestamp>().unwrap();
+        assert_eq!(
+            instant.local_date(&zone.0).unwrap().to_string(),
+            "2101-06-30"
+        );
+    }
+
     #[test]
     fn owned_contracts_reject_invalid_ids_timezones_and_unknown_fields() {
         for id in ["", "Example", "a--b", "../example", "example/"] {

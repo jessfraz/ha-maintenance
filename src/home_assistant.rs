@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use chrono::Utc;
+use crate::calendar::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -231,7 +231,7 @@ impl Registry {
         // Validate the complete replacement before taking the write lock. An
         // invalid report must never discard a previously usable snapshot.
         *self.received.write().await = Some(ReceivedRegistry {
-            at: Utc::now().timestamp(),
+            at: Timestamp::now().unix_seconds(),
             report,
         });
         Ok(())
@@ -244,7 +244,7 @@ impl Registry {
                 at,
                 report: RegistryReport::Ready(snapshot),
             }) => {
-                if Utc::now().timestamp().saturating_sub(*at) < 180 {
+                if Timestamp::now().unix_seconds().saturating_sub(*at) < 180 {
                     RegistryCatalog::Ready(snapshot.clone())
                 } else {
                     RegistryCatalog::Stale(snapshot.clone())
@@ -267,11 +267,11 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use crate::calendar::Timestamp;
     use crate::home_assistant::{
         BaseUrl, EntityId, InstanceId, ReceivedRegistry, Registry, RegistryCatalog, RegistryId,
         RegistryReport, RegistrySnapshot, RegistryTarget, RegistryUnavailableReason,
     };
-    use chrono::Utc;
 
     fn snapshot() -> RegistrySnapshot {
         RegistrySnapshot {
@@ -370,7 +370,7 @@ mod tests {
             RegistryCatalog::Ready(snapshot.clone())
         );
         *registry.received.write().await = Some(ReceivedRegistry {
-            at: Utc::now().timestamp() - 180,
+            at: Timestamp::now().unix_seconds() - 180,
             report: RegistryReport::Ready(snapshot.clone()),
         });
         assert_eq!(

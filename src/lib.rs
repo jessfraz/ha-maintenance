@@ -1,4 +1,5 @@
 pub mod api;
+pub mod calendar;
 pub mod config;
 pub mod error;
 pub mod home_assistant;
