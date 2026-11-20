@@ -1,4 +1,4 @@
-use chrono::Utc;
+use crate::calendar::Timestamp;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -46,9 +46,9 @@ pub struct Installation {
 impl Installation {
     pub async fn report(&self) -> InstallationReport {
         let presence = self.presence.read().await;
-        let connected = presence
-            .as_ref()
-            .is_some_and(|presence| Utc::now().timestamp().saturating_sub(presence.at) < 180);
+        let connected = presence.as_ref().is_some_and(|presence| {
+            Timestamp::now().unix_seconds().saturating_sub(presence.at) < 180
+        });
         InstallationReport {
             version: env!("CARGO_PKG_VERSION").into(),
             integration_connected: connected,
@@ -64,7 +64,7 @@ impl Installation {
     }
     pub async fn is_owner(&self, id: &str) -> bool {
         self.presence.read().await.as_ref().is_some_and(|presence| {
-            Utc::now().timestamp().saturating_sub(presence.at) < 180
+            Timestamp::now().unix_seconds().saturating_sub(presence.at) < 180
                 && presence.owner_id.as_deref() == Some(id)
         })
     }
@@ -78,12 +78,12 @@ impl Installation {
             || report
                 .backup
                 .last_backup
-                .is_some_and(|at| at < 0 || at > Utc::now().timestamp() + 60)
+                .is_some_and(|at| at < 0 || at > Timestamp::now().unix_seconds() + 60)
         {
             return Err(crate::error::Error::Invalid("invalid integration report"));
         }
         *self.presence.write().await = Some(Presence {
-            at: Utc::now().timestamp(),
+            at: Timestamp::now().unix_seconds(),
             backup: report.backup,
             owner_id: report.owner_id,
         });
@@ -93,8 +93,8 @@ impl Installation {
 
 #[cfg(test)]
 mod tests {
+    use crate::calendar::Timestamp;
     use crate::installation::{BackupReport, Installation, Presence, PresenceReport};
-    use chrono::Utc;
 
     #[tokio::test]
     async fn instruction_owner_expires_with_the_integration_presence_lease() {
@@ -111,7 +111,7 @@ mod tests {
         assert!(installation.is_owner("example-owner").await);
         assert!(!installation.is_owner("example-admin").await);
         *installation.presence.write().await = Some(Presence {
-            at: Utc::now().timestamp() - 180,
+            at: Timestamp::now().unix_seconds() - 180,
             backup: BackupReport::default(),
             owner_id: Some("example-owner".into()),
         });

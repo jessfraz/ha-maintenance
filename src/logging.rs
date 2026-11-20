@@ -23,7 +23,7 @@ struct Fields {
 }
 #[derive(Serialize)]
 struct Entry {
-    timestamp: chrono::DateTime<chrono::Utc>,
+    timestamp: crate::calendar::Timestamp,
     event: &'static str,
     #[serde(flatten)]
     fields: Fields,
@@ -47,7 +47,7 @@ impl<W: Write + Send> Drain for SafeLog<W> {
             return Ok(());
         }
         if let Ok(mut line) = serde_json::to_vec(&Entry {
-            timestamp: chrono::Utc::now(),
+            timestamp: crate::calendar::Timestamp::now(),
             event,
             fields,
         }) {

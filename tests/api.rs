@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use home_maintenance::calendar::{Date, Timestamp};
 use home_maintenance::{
     api::{self, Context, Role, System},
     models::{
@@ -80,7 +80,7 @@ impl Fixture {
 fn input(id: &str) -> CreateItem {
     CreateItem {
         id: ItemId::try_from(id.to_owned()).unwrap(),
-        due: Some(NaiveDate::from_ymd_opt(2031, 2, 17).unwrap()),
+        due: Some(Date::new(2031, 2, 17).unwrap()),
         definition: Definition {
             name: "Example filter".into(),
             summary: "Replace the example filter".into(),
@@ -397,7 +397,7 @@ async fn permanent_delete_prevents_source_resurrection_but_preserves_migration_r
     let f = Fixture::new().await;
     let mut target = migration_item("example-delete-migration");
     target.history.push(ImportedCompletion {
-        completed_at: Some(chrono::Utc::now()),
+        completed_at: Some(Timestamp::now()),
         ..Default::default()
     });
     let migration = Migration {
@@ -461,8 +461,8 @@ async fn permanent_delete_prevents_source_resurrection_but_preserves_migration_r
 #[tokio::test]
 async fn due_dates_leave_room_for_the_calendar_exclusive_end() {
     let f = Fixture::new().await;
-    let last_day = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
-    let last_due = NaiveDate::from_ymd_opt(9999, 12, 30).unwrap();
+    let last_day = Date::new(9999, 12, 31).unwrap();
+    let last_due = Date::new(9999, 12, 30).unwrap();
     let mut invalid = input("example-invalid-date");
     invalid.due = Some(last_day);
     let response = f
@@ -875,8 +875,8 @@ async fn completion_is_atomic_replayable_and_scoped_to_one_occurrence() {
                     event
                         .completed_at
                         .unwrap()
-                        .with_timezone(&first.definition.timezone.0)
-                        .date_naive()
+                        .local_date(&first.definition.timezone.0)
+                        .unwrap()
                 )
                 .unwrap()
         )
@@ -2181,7 +2181,7 @@ async fn task_completion_lifecycles_preserve_once_standing_and_recurring_semanti
     ] {
         let mut definition = input(id);
         definition.due = if matches!(schedule, Schedule::Recurring { .. }) {
-            Some(chrono::Utc::now().date_naive())
+            Some(Timestamp::now().utc_date())
         } else {
             None
         };
@@ -2250,8 +2250,8 @@ async fn task_completion_lifecycles_preserve_once_standing_and_recurring_semanti
                                 event
                                     .completed_at
                                     .unwrap()
-                                    .with_timezone(&completed.definition.timezone.0)
-                                    .date_naive()
+                                    .local_date(&completed.definition.timezone.0)
+                                    .unwrap()
                             )
                             .unwrap()
                     )
@@ -2294,7 +2294,7 @@ async fn dated_then_unknown_pagination_and_due_clearing_are_null_safe() {
         ("example-late", Some("2032-01-01")),
     ] {
         let mut item = input(id);
-        item.due = due.map(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap());
+        item.due = due.map(|date| Date::parse_storage(date).unwrap());
         item.definition.schedule = Schedule::Once;
         f.store
             .create(
@@ -2370,9 +2370,7 @@ async fn migration_preview_apply_history_and_replays_preserve_known_and_unknown_
     let f = Fixture::new().await;
     let mut active = migration_item("example-migrated");
     active.item.definition.schedule = Schedule::Standing;
-    let known_time = chrono::DateTime::parse_from_rfc3339("2025-02-03T04:05:06+02:00")
-        .unwrap()
-        .to_utc();
+    let known_time = "2025-02-03T04:05:06+02:00".parse::<Timestamp>().unwrap();
     let event_id = Uuid::from_u128(1234);
     let event_occurrence = Uuid::from_u128(5678);
     active.history = vec![
@@ -2927,7 +2925,7 @@ async fn recurring_due_is_required_at_every_definition_write_boundary() {
         Schedule::Once
     );
     let zone = TimeZone::try_from("Pacific/Kiritimati".to_owned()).unwrap();
-    let today = chrono::Utc::now().with_timezone(&zone.0).date_naive();
+    let today = Timestamp::now().local_date(&zone.0).unwrap();
     let response = f
         .client
         .patch(format!("{}/v1/items/{}", f.origin, undated.id.as_ref()))
@@ -2935,7 +2933,7 @@ async fn recurring_due_is_required_at_every_definition_write_boundary() {
         .header("If-Match", format!("\"{}\"", undated.revision))
         .json(&UpdateItem {
             schedule: Change(Some(schedule)),
-            timezone: Change(Some(zone)),
+            timezone: Change(Some(zone.clone())),
             due: Change(Some(Some(today))),
             ..Default::default()
         })
@@ -2945,7 +2943,10 @@ async fn recurring_due_is_required_at_every_definition_write_boundary() {
     assert_eq!(response.status(), StatusCode::OK);
     let updated: Item = response.json().await.unwrap();
     assert_eq!(updated.occurrence.due, Some(today));
-    assert_eq!(updated.definition.timezone.0, zone.0);
+    assert_eq!(
+        String::from(updated.definition.timezone),
+        String::from(zone)
+    );
     f.finish().await;
 }
 
@@ -3280,7 +3281,7 @@ async fn instruction_constraints_and_transactional_management_prevent_bypasses()
     let f = Fixture::new().await;
     let valid = instruction_input("example-guarded-instruction");
     let mut dated = valid.clone();
-    dated.due = Some(chrono::Utc::now().date_naive());
+    dated.due = Some(Timestamp::now().utc_date());
     let mut checked = valid.clone();
     checked.definition.checklist = input("unused").definition.checklist;
     let mut reordered = valid.clone();
@@ -3957,6 +3958,185 @@ async fn registry_publication_validates_whole_reports_and_route_specific_size_li
     match get_registry(&f).await {
         RegistryCatalog::Ready(snapshot) => assert_eq!(snapshot.targets.len(), 20_000),
         other => panic!("invalid report replaced ready catalog: {other:?}"),
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn calendar_wire_preservation_dates_timezones_and_errors() {
+    #[derive(serde::Serialize)]
+    struct WireItem<'a> {
+        id: &'a str,
+        due: &'a str,
+        #[serde(flatten)]
+        definition: Definition,
+    }
+    #[derive(serde::Deserialize)]
+    struct WireError {
+        error_code: Option<String>,
+    }
+    let f = Fixture::new().await;
+    for (index, (due, canonical, code)) in [
+        ("2032-2-29", Some("2032-02-29"), None),
+        (" 2032 - 2 - 29 ", Some("2032-02-29"), None),
+        ("0001-01-01", Some("0001-01-01"), None),
+        ("9999-12-30", Some("9999-12-30"), None),
+        ("9999-12-31", None, Some("invalid_input")),
+        ("0000-01-01", None, Some("invalid_input")),
+        ("+10000-01-01", None, Some("invalid_input")),
+        ("2031-02-29", None, None),
+        ("2031-01-01junk", None, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("example-date-{index}");
+        let response = f
+            .client
+            .post(format!("{}/v1/items", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", &id)
+            .json(&WireItem {
+                id: &id,
+                due,
+                definition: input(&id).definition,
+            })
+            .send()
+            .await
+            .unwrap();
+        if let Some(canonical) = canonical {
+            assert_eq!(response.status(), StatusCode::CREATED, "{due}");
+            let item: Item = response.json().await.unwrap();
+            assert_eq!(item.occurrence.due.unwrap().to_string(), canonical);
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{due}");
+            assert_eq!(
+                response
+                    .json::<WireError>()
+                    .await
+                    .unwrap()
+                    .error_code
+                    .as_deref(),
+                code,
+                "{due}"
+            );
+        }
+    }
+    for name in [
+        "UTC",
+        "Etc/UTC",
+        "US/Eastern",
+        "America/New_York",
+        "Asia/Calcutta",
+    ] {
+        let timezone = TimeZone::try_from(name.to_owned()).unwrap();
+        assert_eq!(
+            serde_json::to_string(&timezone).unwrap(),
+            format!("\"{name}\"")
+        );
+    }
+    for name in [
+        "utc",
+        "america/new_york",
+        "Etc/Unknown",
+        "Factory",
+        "+00:00",
+        " America/New_York",
+    ] {
+        assert!(TimeZone::try_from(name.to_owned()).is_err(), "{name}");
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn calendar_wire_preservation_imported_history_survives_sqlite_restart() {
+    #[derive(serde::Serialize)]
+    struct WireEvent<'a> {
+        completed_at: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct WireItem<'a> {
+        source: home_maintenance::models::SourceRef,
+        item: CreateItem,
+        history: Vec<WireEvent<'a>>,
+    }
+    #[derive(serde::Serialize)]
+    struct WireMigration<'a> {
+        items: Vec<WireItem<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct WireEventResult {
+        completed_at: Option<String>,
+    }
+    let f = Fixture::new().await;
+    let cases = [
+        (
+            "1969-12-31T23:59:59.123456789Z",
+            "1969-12-31T23:59:59.123456789Z",
+        ),
+        ("2025-02-03T04:05:06+02:00", "2025-02-03T02:05:06Z"),
+        ("2025-02-03t04:05:06.1-00:00", "2025-02-03T04:05:06.100Z"),
+        (
+            "2025-02-03 4:5:6.123400000123 UTC",
+            "2025-02-03T04:05:06.123400Z",
+        ),
+        ("2016-12-31T23:59:60.25Z", "2016-12-31T23:59:60.250Z"),
+        (
+            "2017-01-01T01:59:60.123456+02:00",
+            "2016-12-31T23:59:60.123456Z",
+        ),
+    ];
+    for (index, (raw, canonical)) in cases.into_iter().enumerate() {
+        let id = format!("example-history-{index}");
+        let original = migration_item(&id);
+        let body = WireMigration {
+            items: vec![WireItem {
+                source: original.source,
+                item: original.item,
+                history: vec![WireEvent { completed_at: raw }],
+            }],
+        };
+        let response = f
+            .client
+            .post(format!("{}/v1/migrations", f.origin))
+            .bearer_auth(OWNER)
+            .header("Idempotency-Key", &id)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "{raw}: {}",
+            response.text().await.unwrap()
+        );
+        let reopened = Store::open(&f.directory.path().join("maintenance.sqlite3"))
+            .await
+            .unwrap();
+        let page = reopened
+            .events(&ItemId::try_from(id.clone()).unwrap(), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&page.items[0].completed_at).unwrap(),
+            format!("\"{canonical}\""),
+            "{raw}"
+        );
+        reopened.close().await.unwrap();
+        let page = f
+            .client
+            .get(format!("{}/v1/items/{id}/events", f.origin))
+            .bearer_auth(OWNER)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Page<WireEventResult>>()
+            .await
+            .unwrap();
+        assert_eq!(page.items[0].completed_at.as_deref(), Some(canonical));
     }
     f.finish().await;
 }
