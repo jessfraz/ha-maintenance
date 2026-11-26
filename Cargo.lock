@@ -1358,9 +1358,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-tzdb"
-version = "0.1.4"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1283705eb0a21404d2bfd6eef2a7593d240bc42a0bdb39db0ad6fa2ec026524"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
 
 [[package]]
 name = "jobserver"
